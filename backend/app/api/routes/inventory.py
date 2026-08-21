@@ -1215,6 +1215,9 @@ async def import_spools_csv(
     created = 0
     for row in preview.rows:
         if row.status == "valid" and row.spool is not None:
+            # barcode_is_refill is a write-only SpoolCreate hint, not a Spool
+            # column — pop it before building the ORM object.
+            row.spool.pop("barcode_is_refill", None)
             db.add(Spool(**row.spool))
             created += 1
 
@@ -1294,8 +1297,13 @@ async def create_spool(
     _: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_UPDATE),
 ):
     """Create a new spool."""
+    data_dict = spool_data.model_dump()
+    # barcode_is_refill is a write-only hint (persisted onto the SpoolCode row,
+    # not a Spool column) — pop it before building the ORM object.
+    data_dict.pop("barcode_is_refill", None)
+    fields_set = set(spool_data.model_fields_set) - {"barcode_is_refill"}
     try:
-        payload = await prepare_internal_spool_payload(db, spool_data.model_dump(), set(spool_data.model_fields_set))
+        payload = await prepare_internal_spool_payload(db, data_dict, fields_set)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     spool = Spool(**payload)
@@ -1315,9 +1323,12 @@ async def bulk_create_spools(
 ):
     """Create multiple identical spools."""
     spools = []
-    fields_set = set(data.spool.model_fields_set)
+    data_dict = data.spool.model_dump()
+    # Same write-only pop as create_spool above.
+    data_dict.pop("barcode_is_refill", None)
+    fields_set = set(data.spool.model_fields_set) - {"barcode_is_refill"}
     try:
-        payload = await prepare_internal_spool_payload(db, data.spool.model_dump(), fields_set)
+        payload = await prepare_internal_spool_payload(db, data_dict, fields_set)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     for _ in range(data.quantity):

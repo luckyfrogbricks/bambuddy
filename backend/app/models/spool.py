@@ -67,6 +67,9 @@ class Spool(Base):
     encode_time: Mapped[datetime | None] = mapped_column(DateTime)  # When spool was encoded/written to tag
     tag_uid: Mapped[str | None] = mapped_column(String(32))  # RFID tag UID (up to 32 hex chars)
     tray_uuid: Mapped[str | None] = mapped_column(String(32))  # Bambu Lab spool UUID (32 hex chars)
+    barcode: Mapped[str | None] = mapped_column(
+        String(64), index=True
+    )  # Scanned UPC/EAN (canonicalized, no leading zeros) or manufacturer SKU
     data_origin: Mapped[str | None] = mapped_column(String(20))  # How data was populated: manual, rfid_auto, nfc_link
     tag_type: Mapped[str | None] = mapped_column(String(20))  # Tag vendor: bambulab, generic, etc.
     archived_at: Mapped[datetime | None] = mapped_column(DateTime)  # NULL = active
@@ -75,9 +78,38 @@ class Spool(Base):
 
     k_profiles: Mapped[list["SpoolKProfile"]] = relationship(back_populates="spool", cascade="all, delete-orphan")
     assignments: Mapped[list["SpoolAssignment"]] = relationship(back_populates="spool", cascade="all, delete-orphan")
+    # lazy="selectin": codes load eagerly with every Spool query, so the
+    # linked_codes / is_refill properties below are always safe to read in an
+    # async context. Chosen over per-route selectinload() options because a
+    # single forgotten option on any route returning SpoolResponse turns into
+    # a MissingGreenlet 500 in production — the eager default removes that
+    # whole failure class for one tiny extra SELECT per spool query.
+    codes: Mapped[list["SpoolCode"]] = relationship(
+        back_populates="spool", cascade="all, delete-orphan", lazy="selectin"
+    )
     location: Mapped["Location | None"] = relationship(back_populates="spools")
+
+    @property
+    def linked_codes(self) -> list["SpoolCode"]:
+        """Every discovered code except the primary one (already shown via `barcode`).
+
+        Read-only display data for SpoolResponse's `linked_codes` field. The
+        `codes` relationship is lazy="selectin", so it is already loaded on any
+        normally-queried instance; this property never triggers its own IO.
+        """
+        return [c for c in self.codes if not c.is_primary]
+
+    @property
+    def is_refill(self) -> bool:
+        """Whether this spool's primary barcode is the no-spool 'refill' variant.
+
+        Read-only display data for SpoolResponse's `is_refill` field. Same
+        loading contract as `linked_codes` above.
+        """
+        return any(c.is_primary and c.is_refill for c in self.codes)
 
 
 from backend.app.models.location import Location  # noqa: E402
 from backend.app.models.spool_assignment import SpoolAssignment  # noqa: E402
+from backend.app.models.spool_code import SpoolCode  # noqa: E402
 from backend.app.models.spool_k_profile import SpoolKProfile  # noqa: E402

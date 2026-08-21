@@ -329,6 +329,7 @@ async def init_db():
         spool,
         spool_assignment,
         spool_catalog,
+        spool_code,
         spool_k_profile,
         spool_usage_history,
         spoolbuddy_device,
@@ -4426,6 +4427,24 @@ async def run_migrations(conn):
     await _safe_execute(
         conn, "ALTER TABLE notification_providers ADD COLUMN on_ams_drying_suspended BOOLEAN DEFAULT TRUE"
     )
+
+    # Migration: barcode support for spools (#2648).
+    await _migrate_add_spool_barcode(conn)
+
+
+async def _migrate_add_spool_barcode(conn) -> None:
+    """Add the spool.barcode column + index for scan-to-add lookups (#2648).
+
+    Stores the canonicalized (no leading zeros) UPC/EAN — or manufacturer
+    SKU — of a scanned spool so a later scan of the same code resolves from
+    the user's own inventory before falling back to the external community
+    databases. The model declares index=True, so fresh installs get the index
+    from create_all(); migrated databases need it spelled out. The companion
+    spool_code table is entirely new (created by create_all(), CHECK
+    constraint and all), so no ALTER is ever needed for it on either dialect.
+    """
+    await _safe_execute(conn, "ALTER TABLE spool ADD COLUMN barcode VARCHAR(64)")
+    await _safe_execute(conn, "CREATE INDEX IF NOT EXISTS ix_spool_barcode ON spool (barcode)")
 
 
 async def _migrate_backfill_variant_groups(conn) -> None:
