@@ -4,6 +4,7 @@ import { Check, AlertTriangle, RefreshCw, Unlink } from 'lucide-react';
 import type { MatchedSpool } from '../../hooks/useSpoolBuddyState';
 import { spoolbuddyApi } from '../../api/client';
 import { SpoolIcon } from './SpoolIcon';
+import { ScanHint } from './ScanHint';
 import { spoolColorString } from '../../utils/colors';
 
 // Storage key for default core weight
@@ -107,6 +108,11 @@ export function SpoolInfoCard({ spool, scaleWeight, onClose, onSyncWeight, onAss
               {spool.color_name || 'Unknown color'}
             </h3>
             <span className="text-xs font-mono text-zinc-500 shrink-0">#{spool.id}</span>
+            {spool.is_refill && (
+              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                {t('common.refillBadge', 'Refill')}
+              </span>
+            )}
           </div>
           <p className="text-sm text-zinc-400">
             {spool.brand} &bull; {spool.material}
@@ -234,10 +240,11 @@ interface UnknownTagCardProps {
   coreWeight?: number;
   onLinkSpool?: () => void;
   onAddToInventory?: () => void;
+  showScanHint?: boolean;
   onClose?: () => void;
 }
 
-export function UnknownTagCard({ tagUid, scaleWeight, coreWeight, onLinkSpool, onAddToInventory, onClose }: UnknownTagCardProps) {
+export function UnknownTagCard({ tagUid, scaleWeight, coreWeight, onLinkSpool, onAddToInventory, showScanHint, onClose }: UnknownTagCardProps) {
   const { t } = useTranslation();
   const defaultCoreWeight = coreWeight ?? getDefaultCoreWeight();
   const grossWeight = scaleWeight !== null
@@ -295,6 +302,7 @@ export function UnknownTagCard({ tagUid, scaleWeight, coreWeight, onLinkSpool, o
           </button>
         )}
       </div>
+      {showScanHint && <ScanHint className="justify-center" />}
     </div>
   );
 }

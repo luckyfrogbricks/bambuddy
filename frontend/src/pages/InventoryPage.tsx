@@ -89,6 +89,7 @@ const DEFAULT_COLUMNS: ColumnConfig[] = [
   { id: 'note', label: 'Note', visible: false },
   { id: 'pa_k', label: 'PA(K)', visible: true },
   { id: 'tag_id', label: 'Tag ID', visible: false },
+  { id: 'barcode', label: 'Barcode', visible: false },
   { id: 'data_origin', label: 'Data Origin', visible: false },
   { id: 'tag_type', label: 'Linked Tag Type', visible: false },
   { id: 'stock', label: 'Stock', visible: false },
@@ -198,6 +199,7 @@ const columnHeaders: Record<string, (t: TFn) => string> = {
   note: (t) => t('inventory.note'),
   pa_k: () => 'PA(K)',
   tag_id: () => 'Tag ID',
+  barcode: (t) => t('inventory.barcode', { defaultValue: 'Barcode' }),
   data_origin: () => 'Data Origin',
   tag_type: () => 'Linked Tag Type',
   stock: (t) => t('inventory.stock'),
@@ -232,8 +234,15 @@ const columnCells: Record<string, (ctx: CellCtx) => ReactNode> = {
       />
     </div>
   ),
-  material: ({ spool }) => (
-    <span className="text-sm text-white">{spool.material}</span>
+  material: ({ spool, t }) => (
+    <span className="inline-flex items-center gap-1.5 text-sm text-white">
+      {spool.material}
+      {spool.is_refill && (
+        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400">
+          {t('common.refillBadge')}
+        </span>
+      )}
+    </span>
   ),
   subtype: ({ spool }) => (
     <span className="text-sm text-bambu-gray">{spool.subtype || '-'}</span>
@@ -309,6 +318,14 @@ const columnCells: Record<string, (ctx: CellCtx) => ReactNode> = {
     return (
       <span className="text-sm text-bambu-gray font-mono" title={tag}>
         {tag.length > 12 ? `${tag.slice(0, 6)}...${tag.slice(-4)}` : tag}
+      </span>
+    );
+  },
+  barcode: ({ spool }) => {
+    if (!spool.barcode) return <span className="text-sm text-bambu-gray/50">-</span>;
+    return (
+      <span className="text-sm text-bambu-gray font-mono" title={spool.barcode}>
+        {spool.barcode}
       </span>
     );
   },
@@ -433,6 +450,7 @@ const columnSortValues: Record<string, (spool: InventorySpool, assignmentMap: Re
   used: (s) => s.weight_used,
   remaining: (s) => s.label_weight > 0 ? Math.max(0, s.label_weight - s.weight_used) / s.label_weight : 0,
   note: (s) => (s.note || '').toLowerCase(),
+  barcode: (s) => s.barcode || '',
   data_origin: (s) => (s.data_origin || '').toLowerCase(),
   tag_type: (s) => (s.tag_type || '').toLowerCase(),
   stock: (s) => s.slicer_filament ? 1 : 0,

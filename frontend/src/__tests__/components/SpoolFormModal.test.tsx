@@ -1188,3 +1188,102 @@ describe('SpoolFormModal header spool ID (#1385)', () => {
     expect(screen.queryByText(/^#\d+$/)).not.toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Barcode field (scan-to-add support)
+// ---------------------------------------------------------------------------
+describe('SpoolFormModal barcode field', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('sends a null barcode for a normal manual create', async () => {
+    render(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        mode="create"
+        currencySymbol="$"
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Add Spool' })).toBeInTheDocument();
+    });
+
+    const addButtons = screen.getAllByRole('button', { name: /add spool/i });
+    const submitButton = addButtons.find(btn => btn.tagName === 'BUTTON' && btn.querySelector('svg.lucide-save'));
+    fireEvent.click(submitButton!);
+
+    await waitFor(() => {
+      expect(api.createSpool).toHaveBeenCalledTimes(1);
+    });
+
+    const [payload] = vi.mocked(api.createSpool).mock.calls[0] as [Record<string, unknown>];
+    expect(payload).toHaveProperty('barcode', null);
+  });
+
+  it('sends a null barcode when editing a spool that has none', async () => {
+    render(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        spool={existingSpool}
+        mode="edit"
+        currencySymbol="$"
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Edit Spool')).toBeInTheDocument();
+    });
+
+    const saveButton = screen.getByRole('button', { name: /save/i });
+    fireEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(api.updateSpool).toHaveBeenCalledTimes(1);
+    });
+
+    const [, payload] = vi.mocked(api.updateSpool).mock.calls[0] as [number, Record<string, unknown>];
+    // barcode is a normal editable field — always sent, null since
+    // existingSpool has none set.
+    expect(payload).toHaveProperty('barcode', null);
+  });
+
+  it('prefills the barcode field from an existing spool when editing', async () => {
+    render(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        spool={{ ...existingSpool, barcode: '6938936716785' }}
+        mode="edit"
+        currencySymbol="$"
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Edit Spool')).toBeInTheDocument();
+    });
+
+    expect(screen.getByDisplayValue('6938936716785')).toBeInTheDocument();
+  });
+
+  it('clears the barcode field when copying a spool — a copy is a new, unscanned physical item', async () => {
+    render(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        spool={{ ...existingSpool, barcode: '6938936716785' }}
+        mode="copy"
+        currencySymbol="$"
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Copy Spool' })).toBeInTheDocument();
+    });
+
+    expect(screen.queryByDisplayValue('6938936716785')).not.toBeInTheDocument();
+  });
+});
