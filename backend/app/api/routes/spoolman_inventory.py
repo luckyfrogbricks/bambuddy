@@ -41,7 +41,7 @@ from backend.app.models.settings import Settings
 from backend.app.models.spoolman_k_profile import SpoolmanKProfile
 from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
 from backend.app.models.user import User
-from backend.app.schemas.spool import SpoolKProfileBase
+from backend.app.schemas.spool import SpoolKProfileBase, normalize_barcode
 from backend.app.schemas.spoolman import SpoolmanFilamentPatch, SpoolmanSlotAssignmentEnriched
 from backend.app.services.location_service import (
     enrich_spool_dicts_with_location_id,
@@ -163,6 +163,33 @@ async def _clear_stale_slot_fallback_tag_links(
         keep_spool_id=keep_spool_id,
         log_context=f"printer={printer_serial} ams={ams_id} tray={tray_id}",
     )
+
+
+async def _settings_map(db: AsyncSession) -> dict[str, str]:
+    result = await db.execute(select(Settings))
+    return {s.key: s.value for s in result.scalars().all()}
+
+
+async def _resolve_linked_codes_json(barcode: str, settings: dict[str, str]) -> str | None:
+    """Cross-reference `barcode` against OFD/SpoolmanDB-Community and return the
+    discovered code bundle JSON-encoded for extra.bambu_linked_codes, or None
+    if nothing was found. Mirrors `persist_barcode_codes_for_spool`'s
+    cross-referencing for the local-DB inventory mode (see
+    `services/barcode_resolver.py`). Honors the barcode_lookup_enabled setting
+    via `external_all_codes` — with the toggle off, a Spoolman-mode spool save
+    must not download anything."""
+    from backend.app.schemas.spool import classify_code
+    from backend.app.services.barcode_resolver import external_all_codes
+
+    code, kind = classify_code(barcode)
+    try:
+        external = await external_all_codes(code, kind, settings)
+    except Exception:
+        logger.warning("Cross-reference lookup failed for Spoolman barcode %s", barcode, exc_info=True)
+        external = None
+    if not external:
+        return None
+    return json.dumps(external[2])
 
 
 async def _get_client(db: AsyncSession) -> SpoolmanClient:
@@ -319,6 +346,23 @@ class SpoolmanInventoryCreate(BaseModel):
     # in the spool's extra dict and read it back in _map_spoolman_spool.
     slicer_filament: str | None = Field(None, max_length=128)
     slicer_filament_name: str | None = Field(None, max_length=255)
+    # Scanned/entered barcode. Spoolman has no native field for this, so it's
+    # persisted under bambu_barcode in the spool's extra dict (same pattern
+    # as slicer_filament/color_name above) and read back in _map_spoolman_spool.
+    barcode: str | None = Field(None, max_length=64)
+    # Whether `barcode` is the "refill" (no-spool) variant — stored under
+    # extra.bambu_barcode_is_refill (the community DBs mark this per code, but a
+    # user-linked/typed code has no signal, so the SpoolBuddy toggle sets it).
+    barcode_is_refill: bool = False
+
+    @field_validator("barcode")
+    @classmethod
+    def validate_barcode(cls, v: str | None) -> str | None:
+        # Same canonicalization as the local-DB SpoolCreate: lookups always
+        # search the canonical (zero-stripped, uppercased-SKU) form, so a raw
+        # leading-zero UPC-A stored un-normalized in extra.bambu_barcode would
+        # never match its own spool on a repeat scan.
+        return normalize_barcode(v)
 
     @field_validator("rgba")
     @classmethod
@@ -361,6 +405,17 @@ class SpoolmanInventoryUpdate(BaseModel):
     # schema). Pass an empty string to clear; null/omitted leaves unchanged.
     slicer_filament: str | None = Field(None, max_length=128)
     slicer_filament_name: str | None = Field(None, max_length=255)
+    # Barcode — persisted to Spoolman extra dict (see Create schema). Pass an
+    # empty string to clear; null/omitted leaves unchanged.
+    barcode: str | None = Field(None, max_length=64)
+
+    @field_validator("barcode")
+    @classmethod
+    def validate_barcode(cls, v: str | None) -> str | None:
+        # Canonicalize exactly like Create above. An explicit "" (clear)
+        # normalizes to None, but clearing keys off model_fields_set — not the
+        # value — so the extra-field write still resets bambu_barcode to "".
+        return normalize_barcode(v)
 
     @field_validator("rgba")
     @classmethod
@@ -555,10 +610,15 @@ async def create_spool(
 
     spool, price_warnings = await _apply_price_if_set(client, spool, data.cost_per_kg)
 
-    # Persist slicer_filament AND color_name under the spool's extra dict
-    # (mirror update_spool). Spoolman has no `color_name` field on filament
-    # (#1357) so we own the round-trip ourselves.
-    if data.slicer_filament is not None or data.slicer_filament_name is not None or data.color_name is not None:
+    # Persist slicer_filament AND color_name AND barcode under the spool's
+    # extra dict (mirror update_spool). Spoolman has no native field for any
+    # of them (#1357) so we own the round-trip ourselves.
+    if (
+        data.slicer_filament is not None
+        or data.slicer_filament_name is not None
+        or data.color_name is not None
+        or data.barcode is not None
+    ):
         # Ensure extra fields are registered before write.
         if data.slicer_filament is not None:
             await client.ensure_extra_field("bambu_slicer_filament")
@@ -566,6 +626,10 @@ async def create_spool(
             await client.ensure_extra_field("bambu_slicer_filament_name")
         if data.color_name is not None:
             await client.ensure_extra_field("bambu_color_name")
+        if data.barcode is not None:
+            await client.ensure_extra_field("bambu_barcode")
+            await client.ensure_extra_field("bambu_linked_codes")
+            await client.ensure_extra_field("bambu_barcode_is_refill")
         new_extra: dict = {}
         if data.slicer_filament is not None:
             new_extra["bambu_slicer_filament"] = json.dumps(data.slicer_filament)
@@ -573,6 +637,16 @@ async def create_spool(
             new_extra["bambu_slicer_filament_name"] = json.dumps(data.slicer_filament_name)
         if data.color_name is not None:
             new_extra["bambu_color_name"] = json.dumps(data.color_name)
+        if data.barcode is not None:
+            new_extra["bambu_barcode"] = json.dumps(data.barcode)
+            # The user's refill toggle: whether the primary bambu_barcode is the
+            # no-spool variant (bambu_linked_codes carry is_refill per sibling,
+            # but the primary barcode is just a string, so store it separately).
+            new_extra["bambu_barcode_is_refill"] = json.dumps(bool(data.barcode_is_refill))
+            if data.barcode:
+                linked_json = await _resolve_linked_codes_json(data.barcode, await _settings_map(db))
+                if linked_json:
+                    new_extra["bambu_linked_codes"] = linked_json
         if new_extra:
             try:
                 async with _translate_spoolman_errors():
@@ -580,7 +654,7 @@ async def create_spool(
             except HTTPException:
                 # Best-effort — the spool already exists, log and continue.
                 logger.warning(
-                    "Failed to persist slicer_filament/color_name for spool %s",
+                    "Failed to persist slicer_filament/color_name/barcode for spool %s",
                     spool.get("id"),
                 )
 
@@ -852,7 +926,8 @@ async def update_spool(
     sf_set = "slicer_filament" in data.model_fields_set
     sfn_set = "slicer_filament_name" in data.model_fields_set
     cn_set = "color_name" in data.model_fields_set
-    if sf_set or sfn_set or cn_set:
+    bc_set = "barcode" in data.model_fields_set
+    if sf_set or sfn_set or cn_set or bc_set:
         # Ensure extra fields are registered (Spoolman rejects PATCHes with
         # unknown keys with HTTP 400). Idempotent if startup already ran this.
         if sf_set:
@@ -861,6 +936,10 @@ async def update_spool(
             await client.ensure_extra_field("bambu_slicer_filament_name")
         if cn_set:
             await client.ensure_extra_field("bambu_color_name")
+        if bc_set:
+            await client.ensure_extra_field("bambu_barcode")
+            await client.ensure_extra_field("bambu_linked_codes")
+            await client.ensure_extra_field("bambu_barcode_is_refill")
         new_extra: dict = {}
         if sf_set:
             new_extra["bambu_slicer_filament"] = json.dumps(data.slicer_filament or "")
@@ -868,6 +947,19 @@ async def update_spool(
             new_extra["bambu_slicer_filament_name"] = json.dumps(data.slicer_filament_name or "")
         if cn_set:
             new_extra["bambu_color_name"] = json.dumps(data.color_name or "")
+        if bc_set:
+            # Reset-then-set: a barcode change replaces the linked-code bundle
+            # and clears the refill flag (the edit form has no refill toggle),
+            # rather than leaving stale values from the previous barcode —
+            # mirrors persist_barcode_codes_for_spool's delete-then-insert in
+            # local mode.
+            new_extra["bambu_barcode"] = json.dumps(data.barcode or "")
+            new_extra["bambu_linked_codes"] = json.dumps([])
+            new_extra["bambu_barcode_is_refill"] = json.dumps(False)
+            if data.barcode:
+                linked_json = await _resolve_linked_codes_json(data.barcode, await _settings_map(db))
+                if linked_json:
+                    new_extra["bambu_linked_codes"] = linked_json
         async with _translate_spoolman_errors():
             updated = await client.merge_spool_extra(spool_id, new_extra)
 

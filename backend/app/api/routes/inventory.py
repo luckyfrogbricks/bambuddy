@@ -2,7 +2,7 @@ import json
 import logging
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, func, select
@@ -30,6 +30,7 @@ from backend.app.models.spool_k_profile import SpoolKProfile
 from backend.app.models.user import User
 from backend.app.schemas.location import LocationCreate, LocationResponse, LocationUpdate
 from backend.app.schemas.spool import (
+    BarcodeLookupResponse,
     SpoolAssignmentCreate,
     SpoolAssignmentResponse,
     SpoolBulkCreate,
@@ -38,10 +39,19 @@ from backend.app.schemas.spool import (
     SpoolKProfileResponse,
     SpoolResponse,
     SpoolUpdate,
+    classify_code,
     normalize_effect_type,
     normalize_extra_colors,
 )
 from backend.app.schemas.spool_usage import SpoolUsageHistoryResponse
+from backend.app.services.barcode_resolver import (
+    barcode_lookup_enabled,
+    persist_barcode_codes_for_spool,
+    persist_spool_codes,
+    resolve_barcode,
+    resolve_codes_for_barcode,
+)
+from backend.app.services.catalog_search import CatalogSearchRow, search_catalog
 from backend.app.services.location_service import (
     DUPLICATE_LOCATION_NAME,
     assign_location_name,
@@ -1213,16 +1223,29 @@ async def import_spools_csv(
         return preview
 
     created = 0
+    created_spools: list[tuple[Spool, str | None]] = []
     for row in preview.rows:
         if row.status == "valid" and row.spool is not None:
-            # barcode_is_refill is a write-only SpoolCreate hint, not a Spool
-            # column — pop it before building the ORM object.
-            row.spool.pop("barcode_is_refill", None)
-            db.add(Spool(**row.spool))
+            spool = Spool(**row.spool)
+            db.add(spool)
+            created_spools.append((spool, row.spool.get("barcode")))
             created += 1
 
     if created:
         await db.commit()
+        # Without SpoolCode rows an imported spool would never resolve on a
+        # later scan of its own barcode. Resolve each distinct barcode's
+        # external cross-reference once, not once per row — an import can
+        # have many rows sharing one barcode.
+        settings = await _load_settings_map(db)
+        codes_by_barcode: dict[str, tuple[str, str, list[dict]]] = {}
+        for spool, barcode in created_spools:
+            if not barcode:
+                continue
+            if barcode not in codes_by_barcode:
+                codes_by_barcode[barcode] = await resolve_codes_for_barcode(barcode, settings)
+            code, kind, all_codes = codes_by_barcode[barcode]
+            await persist_spool_codes(db, spool.id, code, kind, all_codes)
         await ws_manager.broadcast({"type": "inventory_changed"})
 
     return ImportResult(
@@ -1300,7 +1323,7 @@ async def create_spool(
     data_dict = spool_data.model_dump()
     # barcode_is_refill is a write-only hint (persisted onto the SpoolCode row,
     # not a Spool column) — pop it before building the ORM object.
-    data_dict.pop("barcode_is_refill", None)
+    barcode_is_refill = bool(data_dict.pop("barcode_is_refill", False))
     fields_set = set(spool_data.model_fields_set) - {"barcode_is_refill"}
     try:
         payload = await prepare_internal_spool_payload(db, data_dict, fields_set)
@@ -1310,6 +1333,13 @@ async def create_spool(
     db.add(spool)
     await db.commit()
     await db.refresh(spool)
+    settings = await _load_settings_map(db)
+    await persist_barcode_codes_for_spool(db, spool.id, spool.barcode, settings, primary_is_refill=barcode_is_refill)
+    # The refresh above already populated `codes` (lazy="selectin") — before
+    # the rows were persisted. The re-SELECT below returns the same
+    # identity-mapped instance without repopulating an already-loaded
+    # collection, so expire it or the response reports linked_codes as [].
+    db.expire(spool, ["codes"])
     result = await db.execute(select(Spool).options(selectinload(Spool.k_profiles)).where(Spool.id == spool.id))
     await ws_manager.broadcast({"type": "inventory_changed"})
     return result.scalar_one()
@@ -1325,7 +1355,7 @@ async def bulk_create_spools(
     spools = []
     data_dict = data.spool.model_dump()
     # Same write-only pop as create_spool above.
-    data_dict.pop("barcode_is_refill", None)
+    barcode_is_refill = bool(data_dict.pop("barcode_is_refill", False))
     fields_set = set(data.spool.model_fields_set) - {"barcode_is_refill"}
     try:
         payload = await prepare_internal_spool_payload(db, data_dict, fields_set)
@@ -1337,9 +1367,67 @@ async def bulk_create_spools(
         spools.append(spool)
     await db.commit()
     ids = [s.id for s in spools]
+    if payload.get("barcode"):
+        # All spools in the batch share one barcode — resolve the external
+        # cross-reference once, not once per spool.
+        settings = await _load_settings_map(db)
+        code, kind, all_codes = await resolve_codes_for_barcode(payload["barcode"], settings)
+        for spool_id in ids:
+            await persist_spool_codes(db, spool_id, code, kind, all_codes, primary_is_refill=barcode_is_refill)
     result = await db.execute(select(Spool).options(selectinload(Spool.k_profiles)).where(Spool.id.in_(ids)))
     await ws_manager.broadcast({"type": "inventory_changed"})
     return list(result.scalars().all())
+
+
+@router.get("/barcode/catalog-search", response_model=list[CatalogSearchRow])
+async def barcode_catalog_search(
+    q: str = Query(..., min_length=2, max_length=100),
+    limit: int = Query(25, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    _: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_READ),
+):
+    """Search inventory + cached community databases for the SpoolBuddy "Find
+    This Filament" flow (see services/catalog_search.py for the search itself).
+
+    Declared before ``GET /barcode/{barcode}`` so the literal path wins
+    routing over the parameterised one.
+    """
+    settings = await _load_settings_map(db)
+    client = await _ensure_spoolman_client(settings)
+    return await search_catalog(db, q, limit, settings, client)
+
+
+@router.get("/barcode/{barcode}", response_model=BarcodeLookupResponse)
+async def lookup_barcode(
+    # Matches Spool.barcode's VARCHAR(64) / SpoolCreate/SpoolUpdate's max_length
+    # — without this, an arbitrarily long path segment reaches classify_code
+    # and the external-lookup chain unbounded.
+    barcode: str = Path(..., max_length=64),
+    db: AsyncSession = Depends(get_db),
+    _: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_READ),
+):
+    """Resolve a scanned/entered barcode to filament fields.
+
+    Checks the user's own inventory (any spool previously created from this
+    barcode) before falling back to the external community databases, so
+    repeat scans of the same retail barcode get instant, exact matches
+    without an external call.
+    """
+    settings = await _load_settings_map(db)
+    spoolman_client = await _ensure_spoolman_client(settings)
+    canonical, kind = classify_code(barcode)
+    fields, source, all_codes = await resolve_barcode(db, canonical, kind, settings, spoolman_client)
+    linked_codes = [c for c in all_codes if c["code"] != canonical]
+    scanned_is_refill = any(c.get("is_refill") for c in all_codes if c["code"] == canonical)
+    return BarcodeLookupResponse(
+        enabled=barcode_lookup_enabled(settings),
+        matched=source is not None,
+        source=source,
+        barcode=canonical,
+        is_refill=scanned_is_refill,
+        linked_codes=linked_codes,
+        **fields,
+    )
 
 
 @router.patch("/spools/{spool_id}", response_model=SpoolResponse)
@@ -1364,10 +1452,21 @@ async def update_spool(
     if "weight_used" in update_data and "weight_locked" not in update_data:
         update_data["weight_locked"] = True
 
+    barcode_changed = "barcode" in update_data and update_data["barcode"] != spool.barcode
+    new_barcode = update_data.get("barcode")
+
     for field, value in update_data.items():
         setattr(spool, field, value)
 
     await db.commit()
+    if barcode_changed:
+        settings = await _load_settings_map(db)
+        await persist_barcode_codes_for_spool(db, spool_id, new_barcode, settings)
+        # Same staleness trap as create_spool: `spool.codes` was eagerly
+        # loaded by the initial SELECT, before the rows were replaced — expire
+        # it so the response query below reloads the new set instead of
+        # echoing the previous barcode's bundle.
+        db.expire(spool, ["codes"])
     result = await db.execute(select(Spool).options(selectinload(Spool.k_profiles)).where(Spool.id == spool_id))
     await ws_manager.broadcast({"type": "inventory_changed"})
     return result.scalar_one()
