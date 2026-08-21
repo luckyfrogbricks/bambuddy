@@ -973,6 +973,7 @@ export function SpoolFormModal({
                   globalLowStockThreshold={globalLowStockThreshold}
                   spoolmanMode={spoolmanMode}
                   linkedCodes={isEditing ? spool?.linked_codes : undefined}
+                  isRefill={isEditing ? spool?.is_refill : undefined}
                 />
               </div>
 

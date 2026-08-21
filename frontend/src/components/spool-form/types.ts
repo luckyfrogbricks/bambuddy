@@ -169,9 +169,13 @@ export interface AdditionalSectionProps extends SectionProps {
   // object, so SpoolWeightPicker is hidden and an info notice is shown instead.
   spoolmanMode?: boolean;
   // Sibling GTIN/SKU codes discovered by cross-referencing OFD/SpoolmanDB-Community
-  // against the primary Barcode field's value (see _resolve_barcode in
-  // routes/inventory.py) — read-only display only, never submitted with the form.
+  // against the primary Barcode field's value (see services/barcode_resolver.py)
+  // — read-only display only, never submitted with the form.
   linkedCodes?: LinkedCode[];
+  // Whether the spool's primary barcode is the no-spool "refill" variant —
+  // read-only badge next to the Barcode label when editing (set at scan/create
+  // time; the update path intentionally resets it on a barcode change).
+  isRefill?: boolean;
 }
 
 // PA Profile section props

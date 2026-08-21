@@ -1269,6 +1269,34 @@ describe('SpoolFormModal barcode field', () => {
     expect(screen.getByDisplayValue('6938936716785')).toBeInTheDocument();
   });
 
+  it('shows the Refill badge when editing a refill spool, and not otherwise', async () => {
+    const { rerender } = render(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        spool={{ ...existingSpool, barcode: '6938936716785', is_refill: true }}
+        mode="edit"
+        currencySymbol="$"
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Edit Spool')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Refill')).toBeInTheDocument();
+
+    rerender(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        spool={{ ...existingSpool, barcode: '6938936716785', is_refill: false }}
+        mode="edit"
+        currencySymbol="$"
+      />
+    );
+    expect(screen.queryByText('Refill')).not.toBeInTheDocument();
+  });
+
   it('clears the barcode field when copying a spool — a copy is a new, unscanned physical item', async () => {
     render(
       <SpoolFormModal

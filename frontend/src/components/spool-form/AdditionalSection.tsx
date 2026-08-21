@@ -179,6 +179,7 @@ export function AdditionalSection({
   globalLowStockThreshold,
   spoolmanMode = false,
   linkedCodes = [],
+  isRefill = false,
 }: AdditionalSectionProps) {
   const { t } = useTranslation();
   const { showToast } = useToast();
@@ -377,8 +378,16 @@ export function AdditionalSection({
           inventory or the Open Filament Database), or entered here manually
           to teach the native lookup a mapping ahead of time. */}
       <div>
-        <label className="block text-sm font-medium text-bambu-gray mb-1" htmlFor="spool-barcode">
+        <label
+          className="inline-flex items-center gap-1.5 text-sm font-medium text-bambu-gray mb-1"
+          htmlFor="spool-barcode"
+        >
           {t('inventory.barcode', 'Barcode')}
+          {isRefill && (
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400">
+              {t('common.refillBadge')}
+            </span>
+          )}
         </label>
         <input
           id="spool-barcode"
