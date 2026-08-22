@@ -178,6 +178,34 @@ describe('BarcodeAddModal', () => {
     expect(await screen.findByText('Open Filament DB')).toBeInTheDocument();
   });
 
+  it('distinguishes refill-SKU twins in Find results with a badge and the code', async () => {
+    // Two SpoolmanDB entries for the same color — one with-spool, one refill —
+    // used to render as identical rows with no way to tell them apart.
+    const twin = {
+      source: 'spoolmandb-community', spool_id: null, material: 'PLA', brand: 'Bambu Lab',
+      subtype: 'PLA Pure', color_name: 'Baby Blue', rgba: '89CFF0FF', label_weight: 1000,
+      nozzle_temp_min: null, nozzle_temp_max: null,
+    };
+    (api.searchBarcodeCatalog as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { ...twin, codes: [{ code: '6975337031111', kind: 'gtin', is_refill: false }] },
+      { ...twin, codes: [{ code: '6975337032222', kind: 'gtin', is_refill: true }] },
+    ]);
+    const unmatched = makeScan({
+      matched: false, source: null, material: null, brand: null, subtype: null,
+      color_name: null, rgba: null, label_weight: null,
+    });
+    render(<BarcodeAddModal {...baseProps} scan={unmatched} tagUid="0C1C8364" scaleWeight={1247} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Find This Filament/i }));
+    const input = await screen.findByPlaceholderText(/polymaker charcoal/i);
+    fireEvent.change(input, { target: { value: 'baby blue' } });
+
+    // Each row shows its code, and only the all-refill row carries the badge.
+    expect(await screen.findByText(/6975337032222/)).toBeInTheDocument();
+    expect(screen.getByText(/6975337031111/)).toBeInTheDocument();
+    expect(screen.getAllByText('Refill pack')).toHaveLength(1);
+  });
+
   it('offers "Find This Filament" on the scan-waiting screen (B) and Back returns there', async () => {
     // No scan yet (NFC + weight only, no box/barcode) → the modal sits on screen B.
     render(<BarcodeAddModal {...baseProps} scan={null} tagUid="0C1C8364" scaleWeight={1247} />);

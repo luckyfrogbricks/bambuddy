@@ -4,6 +4,7 @@ import { Barcode, Check, Loader2, Search, AlertTriangle } from 'lucide-react';
 import { api, type InventorySpool, type CatalogSearchRow } from '../../api/client';
 import type { ScannedBarcode, LinkedCode } from '../../hooks/useSpoolBuddyState';
 import { spoolColorString } from '../../utils/colors';
+import { RefillBadge } from '../RefillBadge';
 import { SpoolIcon } from './SpoolIcon';
 import { KioskToggle } from './KioskToggle';
 import { getDefaultCoreWeight } from './coreWeight';
@@ -693,11 +694,21 @@ export function BarcodeAddModal({
                     style={{ backgroundColor: spoolColorString(row.rgba) }}
                   />
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-zinc-100 truncate">
-                      {[row.color_name, row.subtype || row.material].filter(Boolean).join(' — ')}
+                    <div className="flex items-center gap-1.5 text-sm font-medium text-zinc-100">
+                      <span className="truncate">
+                        {[row.color_name, row.subtype || row.material].filter(Boolean).join(' — ')}
+                      </span>
+                      {/* A row whose codes are all refill SKUs is the spool-less
+                          variant — otherwise identical twins (with-spool vs
+                          refill catalog entries) are indistinguishable. */}
+                      {row.codes.length > 0 && row.codes.every((c) => c.is_refill) && (
+                        <RefillBadge className="shrink-0" />
+                      )}
                     </div>
                     <div className="text-xs text-zinc-500 truncate">
                       {[row.brand, row.label_weight ? `${row.label_weight} g` : null].filter(Boolean).join(' • ')}
+                      {/* Primary code disambiguates rows the metadata can't. */}
+                      {row.codes[0] && <span className="font-mono"> • {row.codes[0].code}</span>}
                     </div>
                   </div>
                   <SourcePill source={row.source} t={t} />
