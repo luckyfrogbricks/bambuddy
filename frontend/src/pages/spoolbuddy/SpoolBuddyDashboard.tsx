@@ -28,6 +28,13 @@ function tagsEquivalent(a: string | null | undefined, b: string | null | undefin
   return aNorm.endsWith(bNorm) || bNorm.endsWith(aNorm);
 }
 
+// Auto-close of the Current Spool card after a barcode add (#2648): the scale
+// must read empty within ARM_MS of the add (roll lifted right away = task
+// done), then the Close button turns into a cancellable countdown.
+const AUTO_CLOSE_ARM_MS = 5000;
+const AUTO_CLOSE_EMPTY_G = 50; // ≤ this reads as "nothing on the scale" (drift margin)
+const AUTO_CLOSE_SECONDS = 3;
+
 // Color palette for the cycling spool animation
 const SPOOL_COLORS = [
   '#00AE42', '#FF6B35', '#3B82F6', '#EF4444', '#A855F7',
@@ -493,6 +500,48 @@ export function SpoolBuddyDashboard() {
     (currentTagId === displayedTagId || (currentTagId === null && displayedTagId !== null));
   const liveWeight = useScaleWeight ? currentWeight : null;
 
+  // --- Auto-close the Current Spool card after a barcode add ---
+  // Auto-advance pattern (Netflix "Next episode in 5…"): the add is confirmed,
+  // and lifting the roll off the scale right after signals the task is done —
+  // the card's Close button counts down and closes itself, tappable to close
+  // now, with an X to keep the card open.
+  const [autoCloseArmedAt, setAutoCloseArmedAt] = useState<number | null>(null);
+  const [autoCloseRemaining, setAutoCloseRemaining] = useState<number | null>(null);
+
+  // Scale emptied within the arm window → start the countdown.
+  useEffect(() => {
+    if (autoCloseArmedAt === null) return;
+    if (Date.now() - autoCloseArmedAt > AUTO_CLOSE_ARM_MS) {
+      setAutoCloseArmedAt(null);
+      return;
+    }
+    if (currentWeight !== null && currentWeight <= AUTO_CLOSE_EMPTY_G) {
+      setAutoCloseArmedAt(null);
+      setAutoCloseRemaining(AUTO_CLOSE_SECONDS);
+    }
+  }, [currentWeight, autoCloseArmedAt]);
+
+  // A new tag during the countdown means the user kept working — keep the card
+  // (it switches to the new roll on its own).
+  useEffect(() => {
+    if (currentTagId && autoCloseRemaining !== null) setAutoCloseRemaining(null);
+  }, [currentTagId, autoCloseRemaining]);
+
+  // Tick 3 → 2 → 1, then close via the same path as tapping Close.
+  useEffect(() => {
+    if (autoCloseRemaining === null) return;
+    if (autoCloseRemaining <= 0) {
+      setAutoCloseRemaining(null);
+      setHiddenTagId(displayedTagId);
+      return;
+    }
+    const handle = setTimeout(
+      () => setAutoCloseRemaining((v) => (v === null ? null : v - 1)),
+      1000,
+    );
+    return () => clearTimeout(handle);
+  }, [autoCloseRemaining, displayedTagId]);
+
   // Stats
   const totalSpools = spools.length;
   const materials = new Set(spools.map((s) => s.material)).size;
@@ -662,6 +711,8 @@ export function SpoolBuddyDashboard() {
                       : undefined
                   }
                   onClose={handleCloseSpoolCard}
+                  autoCloseSeconds={autoCloseRemaining}
+                  onCancelAutoClose={() => setAutoCloseRemaining(null)}
                 />
               ) : currentTagId && displayedTagId && !displayedSpool && !sbState.matchedSpool && hiddenTagId !== displayedTagId ? (
                 <UnknownTagCard
@@ -723,6 +774,9 @@ export function SpoolBuddyDashboard() {
         onCreated={() => {
           refetchSpools();
           showToast(t('spoolbuddy.barcode.addedToast', 'Added to inventory'), 'success');
+          // Arm the card auto-close: removing the roll within the window
+          // starts the Close-button countdown.
+          setAutoCloseArmedAt(Date.now());
         }}
         onFallbackQuickAdd={() => {
           barcodeFlow.close();

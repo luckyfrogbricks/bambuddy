@@ -6660,6 +6660,8 @@ export default {
       grossWeight: 'Peso bruto',
       spoolSize: 'Tamaño de la bobina',
       close: 'Cerrar',
+      closingIn: 'Cerrando en {{seconds}}…',
+      cancelAutoClose: 'Cancelar cierre automático',
       currentSpool: 'Bobina actual',
       plateReady: 'Cama lista: {{name}}',
       plateReadyLabel: 'Camas listas para despejar',

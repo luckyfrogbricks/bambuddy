@@ -6287,6 +6287,8 @@ export default {
       grossWeight: "Масса брутто",
       spoolSize: "Размер катушки",
       close: "Закрыть",
+      closingIn: 'Закрытие через {{seconds}}…',
+      cancelAutoClose: 'Отменить автозакрытие',
       currentSpool: "Текущая катушка",
       plateReady: "Пластина готова: {{name}}",
       plateReadyLabel: "Пластины, готовые к очистке",

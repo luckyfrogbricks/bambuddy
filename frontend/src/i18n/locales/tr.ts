@@ -6596,6 +6596,8 @@ export default {
       grossWeight: 'Brüt ağırlık',
       spoolSize: 'Makara boyutu',
       close: 'Kapat',
+      closingIn: '{{seconds}} sn içinde kapanıyor…',
+      cancelAutoClose: 'Otomatik kapatmayı iptal et',
       currentSpool: 'Mevcut Makara',
       plateReady: 'Plaka hazır: {{name}}',
       plateReadyLabel: 'Temizlenmeye hazır plakalar',

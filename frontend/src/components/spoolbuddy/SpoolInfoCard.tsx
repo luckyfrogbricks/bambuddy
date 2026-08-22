@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, AlertTriangle, RefreshCw, Unlink } from 'lucide-react';
+import { Check, AlertTriangle, RefreshCw, Unlink, X } from 'lucide-react';
 import type { MatchedSpool } from '../../hooks/useSpoolBuddyState';
 import { spoolbuddyApi } from '../../api/client';
 import { SpoolIcon } from './SpoolIcon';
@@ -31,9 +31,12 @@ interface SpoolInfoCardProps {
   onAssignToAms?: () => void;
   isAssigned?: boolean;
   onUnassignFromAms?: () => void;
+  /** Seconds left on the auto-close countdown; null/undefined = no countdown. */
+  autoCloseSeconds?: number | null;
+  onCancelAutoClose?: () => void;
 }
 
-export function SpoolInfoCard({ spool, scaleWeight, onClose, onSyncWeight, onAssignToAms, isAssigned, onUnassignFromAms }: SpoolInfoCardProps) {
+export function SpoolInfoCard({ spool, scaleWeight, onClose, onSyncWeight, onAssignToAms, isAssigned, onUnassignFromAms, autoCloseSeconds, onCancelAutoClose }: SpoolInfoCardProps) {
   const { t } = useTranslation();
   const [syncing, setSyncing] = useState(false);
   const [synced, setSynced] = useState(false);
@@ -221,14 +224,33 @@ export function SpoolInfoCard({ spool, scaleWeight, onClose, onSyncWeight, onAss
         >
           {syncing ? '...' : synced ? t('spoolbuddy.dashboard.weightSynced', 'Synced!') : t('spoolbuddy.dashboard.syncWeight', 'Sync Weight')}
         </button>
-        {onClose && (
+        {onClose && (autoCloseSeconds != null ? (
+          // Auto-advance countdown (Netflix "Next episode in 5…" pattern):
+          // tapping the main segment closes now, the X cancels the countdown
+          // and keeps the card open as a plain Close button again.
+          <div className="flex items-stretch rounded-lg overflow-hidden min-h-[44px]">
+            <button
+              onClick={onClose}
+              className="px-5 py-2.5 text-sm font-medium bg-green-600 text-white hover:bg-green-700 transition-colors"
+            >
+              {t('spoolbuddy.dashboard.closingIn', 'Closing in {{seconds}}…', { seconds: autoCloseSeconds })}
+            </button>
+            <button
+              onClick={onCancelAutoClose}
+              aria-label={t('spoolbuddy.dashboard.cancelAutoClose', 'Cancel auto-close')}
+              className="px-3 flex items-center bg-green-700 text-white/90 hover:bg-green-800 transition-colors border-l border-green-500/40"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        ) : (
           <button
             onClick={onClose}
             className="px-5 py-2.5 rounded-lg text-sm font-medium bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors min-h-[44px]"
           >
             {t('spoolbuddy.dashboard.close', 'Close')}
           </button>
-        )}
+        ))}
       </div>
     </div>
   );

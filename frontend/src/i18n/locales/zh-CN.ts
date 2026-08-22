@@ -6640,6 +6640,8 @@ export default {
       grossWeight: '毛重',
       spoolSize: '耗材盘尺寸',
       close: '关闭',
+      closingIn: '{{seconds}} 秒后关闭…',
+      cancelAutoClose: '取消自动关闭',
       currentSpool: '当前耗材',
       plateReady: '热床就绪: {{name}}',
       plateReadyLabel: '待清理的热床',
