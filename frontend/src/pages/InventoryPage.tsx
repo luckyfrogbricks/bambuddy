@@ -2474,8 +2474,9 @@ function SpoolCard({
       <div className="p-4 space-y-3">
         <div className="flex items-start justify-between gap-2">
           <div>
-            <h3 className="font-semibold text-white">
-              {spool.material}{spool.subtype ? ` ${spool.subtype}` : ''}
+            <h3 className="font-semibold text-white flex flex-wrap items-center gap-1.5">
+              <span>{spool.material}{spool.subtype ? ` ${spool.subtype}` : ''}</span>
+              {spool.is_refill && <RefillBadge />}
             </h3>
             <p className="text-sm text-bambu-gray">{spool.brand || '-'}</p>
           </div>
