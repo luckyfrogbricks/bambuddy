@@ -34,7 +34,7 @@ export default {
 
   // Ortak
   common: {
-    refillBadge: 'Dolum',
+    refillBadge: 'Dolum paketi',
     plusNMore: '+{{count}} tane daha',
     save: 'Kaydet',
     saving: 'Kaydediliyor...',

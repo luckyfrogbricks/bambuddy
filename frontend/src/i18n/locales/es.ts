@@ -34,7 +34,7 @@ export default {
 
   // Common
   common: {
-    refillBadge: 'Recarga',
+    refillBadge: 'Pack de recarga',
     plusNMore: '+{{count}} más',
     save: 'Guardar',
     saving: 'Guardando...',

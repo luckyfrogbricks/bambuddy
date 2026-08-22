@@ -1283,7 +1283,7 @@ describe('SpoolFormModal barcode field', () => {
     await waitFor(() => {
       expect(screen.getByText('Edit Spool')).toBeInTheDocument();
     });
-    expect(screen.getByText('Refill')).toBeInTheDocument();
+    expect(screen.getByText('Refill pack')).toBeInTheDocument();
 
     rerender(
       <SpoolFormModal
@@ -1294,7 +1294,7 @@ describe('SpoolFormModal barcode field', () => {
         currencySymbol="$"
       />
     );
-    expect(screen.queryByText('Refill')).not.toBeInTheDocument();
+    expect(screen.queryByText('Refill pack')).not.toBeInTheDocument();
   });
 
   it('clears the barcode field when copying a spool — a copy is a new, unscanned physical item', async () => {

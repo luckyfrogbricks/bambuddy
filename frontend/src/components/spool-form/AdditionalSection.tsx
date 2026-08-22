@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { Scale } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from '../../contexts/ToastContext';
+import { RefillBadge } from '../RefillBadge';
 import type { AdditionalSectionProps } from './types';
 
 function SpoolWeightPicker({
@@ -383,11 +384,7 @@ export function AdditionalSection({
           htmlFor="spool-barcode"
         >
           {t('inventory.barcode', 'Barcode')}
-          {isRefill && (
-            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400">
-              {t('common.refillBadge')}
-            </span>
-          )}
+          {isRefill && <RefillBadge />}
         </label>
         <input
           id="spool-barcode"

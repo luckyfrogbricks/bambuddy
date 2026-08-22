@@ -34,7 +34,7 @@ export default {
 
   // Common
   common: {
-    refillBadge: 'Refill',
+    refillBadge: 'Refill pack',
     plusNMore: '+{{count}} more',
     save: 'Save',
     saving: 'Saving...',

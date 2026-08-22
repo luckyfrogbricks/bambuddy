@@ -10,6 +10,7 @@ import {
   Upload, Download,
 } from 'lucide-react';
 import { ForecastPanel } from '../components/ForecastPanel';
+import { RefillBadge } from '../components/RefillBadge';
 import { api, spoolbuddyApi, ApiError } from '../api/client';
 import type { InventorySpool, SpoolCatalogEntry } from '../api/client';
 import { Button } from '../components/Button';
@@ -234,14 +235,10 @@ const columnCells: Record<string, (ctx: CellCtx) => ReactNode> = {
       />
     </div>
   ),
-  material: ({ spool, t }) => (
+  material: ({ spool }) => (
     <span className="inline-flex items-center gap-1.5 text-sm text-white">
       {spool.material}
-      {spool.is_refill && (
-        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400">
-          {t('common.refillBadge')}
-        </span>
-      )}
+      {spool.is_refill && <RefillBadge />}
     </span>
   ),
   subtype: ({ spool }) => (
