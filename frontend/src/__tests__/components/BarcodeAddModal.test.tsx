@@ -198,4 +198,24 @@ describe('BarcodeAddModal', () => {
     );
     expect(screen.queryByText('Charcoal Black')).not.toBeInTheDocument();
   });
+
+  it('shows the backend error and stays open when the create is rejected', async () => {
+    // e.g. the duplicate-tag 409 guard: a stale tag already linked to another
+    // spool must surface as a visible error, not a silently dead button.
+    (api.createSpool as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('Tag 72DB77EB is already linked to spool #41'),
+    );
+    render(
+      <BarcodeAddModal {...baseProps} scan={makeScan()} tagUid="72DB77EB" scaleWeight={1247} />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /^Add to Inventory$/i }));
+
+    expect(await screen.findByText(/already linked to spool #41/i)).toBeInTheDocument();
+    expect(baseProps.onClose).not.toHaveBeenCalled();
+    expect(baseProps.onCreated).not.toHaveBeenCalled();
+
+    // A retry after the failure works and closes the modal.
+    fireEvent.click(screen.getByRole('button', { name: /^Add to Inventory$/i }));
+    await waitFor(() => expect(baseProps.onCreated).toHaveBeenCalledTimes(1));
+  });
 });

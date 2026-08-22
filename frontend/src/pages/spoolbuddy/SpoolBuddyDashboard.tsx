@@ -250,6 +250,16 @@ export function SpoolBuddyDashboard() {
 
   // Track current tag from state
   const currentTagId = sbState.matchedSpool?.tag_uid ?? sbState.unknownTagUid ?? null;
+
+  // Tag offered to the barcode add flow: never a tag that is already linked to
+  // an active spool — attaching it to a second spool makes every later tag
+  // lookup ambiguous (reachable when a missed tag-removed event leaves stale
+  // tag state behind; the backend also rejects such a create with a 409).
+  const barcodeAddTagUid = useMemo(() => {
+    if (!currentTagId) return null;
+    const linked = spools.some((s) => !s.archived_at && tagsEquivalent(s.tag_uid, currentTagId));
+    return linked ? null : currentTagId;
+  }, [currentTagId, spools]);
   const currentWeight = sbState.weight;
   const weightStable = sbState.weightStable;
 
@@ -702,7 +712,10 @@ export function SpoolBuddyDashboard() {
         isOpen={barcodeFlow.isOpen}
         onClose={barcodeFlow.close}
         scan={sbState.lastScan}
-        tagUid={displayedTagId ?? sbState.unknownTagUid}
+        /* Live tag only — displayedTagId is the sticky Current Spool card state
+           and persists after the roll is removed, which would show (and attach)
+           a stale tag on the next barcode-first add. */
+        tagUid={barcodeAddTagUid}
         trayUuid={sbState.unknownTrayUuid}
         scaleWeight={liveWeight ?? displayedWeight}
         spoolmanMode={spoolmanMode}

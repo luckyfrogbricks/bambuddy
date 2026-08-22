@@ -91,6 +91,7 @@ export function BarcodeAddModal({
   const [findRows, setFindRows] = useState<CatalogSearchRow[]>([]);
   const [findLoading, setFindLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
   const [linkedByUser, setLinkedByUser] = useState(false);
   // "Refill" vs "with spool": the community DBs mark this via eans_refill /
   // spool_refill, so a scanned/looked-up known code auto-arms this toggle
@@ -147,6 +148,7 @@ export function BarcodeAddModal({
     setFindQuery('');
     setFindRows([]);
     setBusy(false);
+    setCreateError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
@@ -316,6 +318,7 @@ export function BarcodeAddModal({
     async (useTag: boolean) => {
       if (!resolved) return;
       setBusy(true);
+      setCreateError(null);
       try {
         const payload = buildPayload(resolved, useTag);
         if (spoolmanMode) {
@@ -334,10 +337,15 @@ export function BarcodeAddModal({
       } catch (e) {
         // Surface the error but keep the modal open so the user can retry.
         console.error('Failed to add spool from barcode:', e);
+        setCreateError(
+          e instanceof Error && e.message
+            ? e.message
+            : t('spoolbuddy.errors.quickAddFailed', 'Failed to add spool'),
+        );
         setBusy(false);
       }
     },
-    [resolved, buildPayload, spoolmanMode, tagUid, trayUuid, onCreated, handleClose],
+    [resolved, buildPayload, spoolmanMode, tagUid, trayUuid, onCreated, handleClose, t],
   );
 
   const sourceLabel = useMemo(() => {
@@ -558,6 +566,13 @@ export function BarcodeAddModal({
               </div>
             )}
 
+            {createError && (
+              <div className="flex gap-2 items-center p-3 mb-4 rounded-lg bg-red-500/10 border border-red-500/25 text-red-200 text-sm">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-red-500" />
+                {createError}
+              </div>
+            )}
+
             <div className="flex gap-2">
               <button type="button" className={btnGhost} onClick={handleClose} disabled={busy}>
                 {t('common.cancel', 'Cancel')}
@@ -597,6 +612,12 @@ export function BarcodeAddModal({
                 )}
               </p>
             </div>
+            {createError && (
+              <div className="flex gap-2 items-center p-3 mb-4 rounded-lg bg-red-500/10 border border-red-500/25 text-red-200 text-sm">
+                <AlertTriangle className="w-4 h-4 shrink-0 text-red-500" />
+                {createError}
+              </div>
+            )}
             <div className="flex gap-2 mb-2.5">
               <button type="button" className={btnSecondary} onClick={() => setStep('waiting')}>
                 {t('spoolbuddy.barcode.rescan', 'Rescan')}

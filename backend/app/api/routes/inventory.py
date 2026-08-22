@@ -1329,6 +1329,21 @@ async def create_spool(
         payload = await prepare_internal_spool_payload(db, data_dict, fields_set)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.get("tag_uid"):
+        # A tag identifies exactly one active spool — silently creating a
+        # duplicate makes every later tag lookup ambiguous (the SpoolBuddy
+        # kiosk hit this when a stale tag from the previous roll leaked into
+        # a barcode-scan add). Archived spools keep their tag and don't count.
+        normalized_tag = normalize_tag_uid(payload["tag_uid"])
+        existing = await db.execute(
+            select(Spool.id).where(func.upper(Spool.tag_uid) == normalized_tag, Spool.archived_at.is_(None)).limit(1)
+        )
+        existing_id = existing.scalar_one_or_none()
+        if existing_id is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Tag {payload['tag_uid']} is already linked to spool #{existing_id}",
+            )
     spool = Spool(**payload)
     db.add(spool)
     await db.commit()
