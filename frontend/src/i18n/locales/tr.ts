@@ -6507,6 +6507,11 @@ export default {
   // SpoolBuddy Kiosk
   spoolbuddy: {
     barcode: {
+      location: 'Konum',
+      lastUsed: 'son kullanılan',
+      noLocation: 'Konum yok',
+      newLocation: 'Yeni…',
+      newLocationPlaceholder: 'Yeni konum adı…',
       scanTitle: "Eklemek için barkod tara",
       scanHint: "Barkodu SpoolBuddy'nin tarayıcı bağlantı noktasının önüne tut.",
       waiting: "Tarama bekleniyor…",

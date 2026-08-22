@@ -6552,6 +6552,11 @@ export default {
   // SpoolBuddy Kiosk
   spoolbuddy: {
     barcode: {
+      location: 'Localização',
+      lastUsed: 'última usada',
+      noLocation: 'Sem localização',
+      newLocation: 'Nova…',
+      newLocationPlaceholder: 'Nome da nova localização…',
       scanTitle: "Escanear código para adicionar",
       scanHint: "Posicione o código de barras em frente à porta do scanner do SpoolBuddy.",
       waiting: "Aguardando leitura…",

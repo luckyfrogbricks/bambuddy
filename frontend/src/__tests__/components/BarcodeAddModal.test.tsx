@@ -22,6 +22,8 @@ vi.mock('../../api/client', () => ({
     linkTagToSpoolmanSpool: vi.fn().mockResolvedValue({ id: 1 }),
     lookupFilamentBarcode: vi.fn(),
     searchBarcodeCatalog: vi.fn().mockResolvedValue([]),
+    getLocations: vi.fn().mockResolvedValue([]),
+    createLocation: vi.fn(),
   },
 }));
 
@@ -225,6 +227,53 @@ describe('BarcodeAddModal', () => {
       <BarcodeAddModal {...baseProps} isOpen={false} scan={makeScan()} tagUid="0C1C8364" scaleWeight={1247} />,
     );
     expect(screen.queryByText('Charcoal Black')).not.toBeInTheDocument();
+  });
+
+  const spoolsWithLocations = [
+    {
+      id: 1, archived_at: null, created_at: '2026-08-20T10:00:00Z',
+      location_id: 5, storage_location: 'Shelf A',
+      material: 'PLA', brand: null, subtype: null, color_name: null, rgba: null,
+      label_weight: 1000, barcode: null,
+    },
+    {
+      id: 2, archived_at: null, created_at: '2026-08-22T10:00:00Z',
+      location_id: 7, storage_location: 'Dry Box 1',
+      material: 'PLA', brand: null, subtype: null, color_name: null, rgba: null,
+      label_weight: 1000, barcode: null,
+    },
+  ] as unknown as import('../../api/client').InventorySpool[];
+
+  it("defaults the location to the last added spool's and sends it in the payload", async () => {
+    (api.getLocations as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 5, name: 'Shelf A' }, { id: 7, name: 'Dry Box 1' },
+    ]);
+    render(
+      <BarcodeAddModal {...baseProps} spools={spoolsWithLocations} scan={makeScan()} tagUid="0C1C8364" scaleWeight={1247} />,
+    );
+    // Chip pre-selects spool #2's location (newest created_at) with the hint.
+    expect(await screen.findByText('Dry Box 1')).toBeInTheDocument();
+    expect(screen.getByText(/last used/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Add to Inventory$/i }));
+    await waitFor(() => expect(api.createSpool).toHaveBeenCalledTimes(1));
+    expect((api.createSpool as ReturnType<typeof vi.fn>).mock.calls[0][0].location_id).toBe(7);
+  });
+
+  it('lets the user clear the location via the picker', async () => {
+    (api.getLocations as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 5, name: 'Shelf A' }, { id: 7, name: 'Dry Box 1' },
+    ]);
+    render(
+      <BarcodeAddModal {...baseProps} spools={spoolsWithLocations} scan={makeScan()} tagUid="0C1C8364" scaleWeight={1247} />,
+    );
+    // Open the picker via the chip, pick "No location".
+    fireEvent.click(await screen.findByRole('button', { name: /Dry Box 1/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /^No location$/ }));
+
+    fireEvent.click(screen.getByRole('button', { name: /^Add to Inventory$/i }));
+    await waitFor(() => expect(api.createSpool).toHaveBeenCalledTimes(1));
+    expect((api.createSpool as ReturnType<typeof vi.fn>).mock.calls[0][0].location_id).toBeNull();
   });
 
   it('shows the backend error and stays open when the create is rejected', async () => {

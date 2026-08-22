@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Barcode, Check, Loader2, Search, AlertTriangle } from 'lucide-react';
+import { Barcode, Check, ChevronDown, ChevronUp, Loader2, MapPin, Plus, Search, AlertTriangle } from 'lucide-react';
 import { api, type InventorySpool, type CatalogSearchRow } from '../../api/client';
 import type { ScannedBarcode, LinkedCode } from '../../hooks/useSpoolBuddyState';
 import { spoolColorString } from '../../utils/colors';
@@ -94,6 +94,17 @@ export function BarcodeAddModal({
   const [busy, setBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [linkedByUser, setLinkedByUser] = useState(false);
+  // Storage location for the new spool. Defaults to the last added spool's
+  // location (see lastUsedLocation); the picker expands inline on the confirm
+  // screen so the happy path stays zero-tap.
+  const [locations, setLocations] = useState<{ id: number; name: string }[]>([]);
+  const [locationId, setLocationId] = useState<number | null>(null);
+  const [locationName, setLocationName] = useState<string | null>(null);
+  const [locationTouched, setLocationTouched] = useState(false);
+  const [locPickerOpen, setLocPickerOpen] = useState(false);
+  const [newLocOpen, setNewLocOpen] = useState(false);
+  const [newLocName, setNewLocName] = useState('');
+  const [newLocError, setNewLocError] = useState<string | null>(null);
   // "Refill" vs "with spool": the community DBs mark this via eans_refill /
   // spool_refill, so a scanned/looked-up known code auto-arms this toggle
   // (applyResolved / selectCatalogRow set it from the resolved code). A
@@ -104,6 +115,31 @@ export function BarcodeAddModal({
   const handledReceiptRef = useRef<number | null>(null);
 
   const coreWeight = getDefaultCoreWeight();
+
+  // The location of the most recently added spool that has one — the picker's
+  // default, so consecutive adds inherit where the last roll was shelved.
+  const lastUsedLocation = useMemo(() => {
+    let latest: InventorySpool | null = null;
+    for (const s of spools) {
+      if (s.archived_at || s.location_id == null) continue;
+      if (!latest || new Date(s.created_at) > new Date(latest.created_at)) latest = s;
+    }
+    return latest ? { id: latest.location_id!, name: latest.storage_location ?? '' } : null;
+  }, [spools]);
+
+  // Pills sorted by where spools were most recently added; untouched
+  // locations trail alphabetically.
+  const orderedLocations = useMemo(() => {
+    const lastAt = new Map<number, number>();
+    for (const s of spools) {
+      if (s.location_id == null) continue;
+      const ts = new Date(s.created_at).getTime();
+      lastAt.set(s.location_id, Math.max(lastAt.get(s.location_id) ?? 0, ts));
+    }
+    return [...locations].sort(
+      (a, b) => (lastAt.get(b.id) ?? 0) - (lastAt.get(a.id) ?? 0) || a.name.localeCompare(b.name),
+    );
+  }, [locations, spools]);
 
   const applyResolved = useCallback((r: Resolved, matched: boolean, wasManual: boolean) => {
     setResolved(r);
@@ -150,7 +186,30 @@ export function BarcodeAddModal({
     setFindRows([]);
     setBusy(false);
     setCreateError(null);
+    setLocationId(lastUsedLocation?.id ?? null);
+    setLocationName(lastUsedLocation?.name ?? null);
+    setLocationTouched(false);
+    setLocPickerOpen(false);
+    setNewLocOpen(false);
+    setNewLocName('');
+    setNewLocError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
+  // Locations for the picker — fetched per open so a location added elsewhere
+  // (web UI, another device) shows up without a kiosk reload.
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    api
+      .getLocations()
+      .then((locs) => {
+        if (!cancelled) setLocations(locs.map((l) => ({ id: l.id, name: l.name })));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen]);
 
   const lookupCode = useCallback(
@@ -310,10 +369,35 @@ export function BarcodeAddModal({
         last_weighed_at: weight !== null ? new Date().toISOString() : null,
         category: null,
         low_stock_threshold_pct: null,
+        location_id: locationId,
       };
     },
-    [coreWeight, isRefill, scaleWeight, spoolmanMode, tagUid],
+    [coreWeight, isRefill, locationId, scaleWeight, spoolmanMode, tagUid],
   );
+
+  const selectLocation = useCallback((id: number | null, name: string | null) => {
+    setLocationId(id);
+    setLocationName(name);
+    setLocationTouched(true);
+    setLocPickerOpen(false);
+    setNewLocOpen(false);
+  }, []);
+
+  const createNewLocation = useCallback(async () => {
+    const name = newLocName.trim();
+    if (!name) return;
+    setNewLocError(null);
+    try {
+      const created = await api.createLocation({ name });
+      setLocations((prev) => [...prev, { id: created.id, name: created.name }]);
+      selectLocation(created.id, created.name);
+      setNewLocName('');
+    } catch (e) {
+      setNewLocError(
+        e instanceof Error && e.message ? e.message : t('locations.saveFailed', 'Failed to save location'),
+      );
+    }
+  }, [newLocName, selectLocation, t]);
 
   const handleCreate = useCallback(
     async (useTag: boolean) => {
@@ -539,12 +623,100 @@ export function BarcodeAddModal({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 p-4 mb-5 rounded-lg bg-zinc-900/60 text-sm">
-              <Row k={t('spoolbuddy.barcode.rowTag', 'Tag')} v={tagUid ?? '—'} />
-              <Row k={t('spoolbuddy.barcode.rowGross', 'Gross weight')} v={grossWeight !== null ? `${grossWeight} g` : '—'} />
-              <Row k={t('spoolbuddy.barcode.rowBarcode', 'Barcode')} v={resolved.barcode} />
-              <Row k={t('spoolbuddy.barcode.rowEst', 'Est. filament')} v={estFilament !== null ? `${estFilament} g` : '—'} />
+            {/* Details grid hides while the location picker is open so the
+                modal stays inside the 600px kiosk height. */}
+            {!locPickerOpen && (
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 p-4 mb-5 rounded-lg bg-zinc-900/60 text-sm">
+                <Row k={t('spoolbuddy.barcode.rowTag', 'Tag')} v={tagUid ?? '—'} />
+                <Row k={t('spoolbuddy.barcode.rowGross', 'Gross weight')} v={grossWeight !== null ? `${grossWeight} g` : '—'} />
+                <Row k={t('spoolbuddy.barcode.rowBarcode', 'Barcode')} v={resolved.barcode} />
+                <Row k={t('spoolbuddy.barcode.rowEst', 'Est. filament')} v={estFilament !== null ? `${estFilament} g` : '—'} />
+              </div>
+            )}
+
+            {/* Storage location — defaults to the last added spool's location */}
+            <div className="flex items-center justify-between gap-3 mb-4 px-3 py-2 rounded-lg bg-zinc-900/60">
+              <span className="flex items-center gap-1.5 text-sm text-zinc-500">
+                <MapPin className="w-4 h-4 text-green-500" />
+                {t('spoolbuddy.barcode.location', 'Location')}
+              </span>
+              <button
+                type="button"
+                onClick={() => setLocPickerOpen((v) => !v)}
+                className="flex items-center gap-1.5 min-h-[36px] px-3 rounded-full text-sm bg-zinc-700 border border-zinc-600 text-zinc-200 hover:bg-zinc-600 transition-colors"
+              >
+                {locationName ?? t('spoolbuddy.barcode.noLocation', 'No location')}
+                {!locationTouched && lastUsedLocation !== null && locationId === lastUsedLocation.id && (
+                  <span className="text-xs text-zinc-400">· {t('spoolbuddy.barcode.lastUsed', 'last used')}</span>
+                )}
+                {locPickerOpen ? (
+                  <ChevronUp className="w-3.5 h-3.5 text-zinc-500" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5 text-zinc-500" />
+                )}
+              </button>
             </div>
+
+            {locPickerOpen && (
+              <div className="p-3 mb-4 rounded-lg bg-zinc-900/80 border border-zinc-700">
+                <div className="flex flex-wrap gap-2 mb-2.5 max-h-36 overflow-y-auto">
+                  {orderedLocations.map((loc) => (
+                    <button
+                      key={loc.id}
+                      type="button"
+                      onClick={() => selectLocation(loc.id, loc.name)}
+                      className={`min-h-[40px] px-3.5 rounded-full text-sm border transition-colors ${
+                        locationId === loc.id
+                          ? 'bg-green-500/15 text-green-400 border-green-500/50'
+                          : 'bg-zinc-700 text-zinc-300 border-zinc-600 hover:bg-zinc-600'
+                      }`}
+                    >
+                      {locationId === loc.id && <Check className="w-3.5 h-3.5 inline mr-1" />}
+                      {loc.name}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => selectLocation(null, null)}
+                    className={`min-h-[40px] px-3.5 rounded-full text-sm border transition-colors ${
+                      locationId === null
+                        ? 'bg-green-500/15 text-green-400 border-green-500/50'
+                        : 'bg-transparent text-zinc-400 border-dashed border-zinc-600 hover:bg-zinc-700'
+                    }`}
+                  >
+                    {t('spoolbuddy.barcode.noLocation', 'No location')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNewLocOpen((v) => !v)}
+                    className="min-h-[40px] px-3.5 rounded-full text-sm border border-dashed border-zinc-600 text-zinc-400 hover:bg-zinc-700 transition-colors flex items-center gap-1"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> {t('spoolbuddy.barcode.newLocation', 'New…')}
+                  </button>
+                </div>
+                {newLocOpen && (
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      autoFocus
+                      value={newLocName}
+                      onChange={(e) => setNewLocName(e.target.value)}
+                      className="flex-1 px-3 py-2 rounded-lg bg-zinc-900 border border-green-500/60 text-zinc-100 text-sm focus:outline-none focus:border-green-500"
+                      placeholder={t('spoolbuddy.barcode.newLocationPlaceholder', 'New location name…')}
+                    />
+                    <button
+                      type="button"
+                      disabled={!newLocName.trim()}
+                      onClick={createNewLocation}
+                      className="px-4 rounded-lg text-sm font-medium bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
+                    >
+                      {t('common.add', 'Add')}
+                    </button>
+                  </div>
+                )}
+                {newLocError && <p className="mt-2 text-xs text-red-300">{newLocError}</p>}
+              </div>
+            )}
 
             {/* Refill vs with-spool — the DBs can't always tell us, so let the
                 user set it; drives the core weight and the stored is_refill. */}

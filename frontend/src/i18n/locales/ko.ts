@@ -6210,6 +6210,11 @@ export default {
   },
   spoolbuddy: {
     barcode: {
+      location: '위치',
+      lastUsed: '최근 사용',
+      noLocation: '위치 없음',
+      newLocation: '새로 만들기…',
+      newLocationPlaceholder: '새 위치 이름…',
       scanTitle: "바코드를 스캔하여 추가",
       scanHint: "소매 바코드를 SpoolBuddy의 스캐너 포트 앞에 대세요.",
       waiting: "스캔 대기 중…",

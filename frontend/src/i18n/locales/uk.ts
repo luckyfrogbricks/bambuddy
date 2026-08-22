@@ -6606,6 +6606,11 @@ export default {
   // SpoolBuddy Kiosk
   spoolbuddy: {
     barcode: {
+      location: 'Розташування',
+      lastUsed: 'останнє',
+      noLocation: 'Без розташування',
+      newLocation: 'Нове…',
+      newLocationPlaceholder: 'Назва нового розташування…',
       scanTitle: "Скануйте штрих-код, щоб додати",
       scanHint: "Піднесіть роздрібний штрих-код до віконця сканера на SpoolBuddy.",
       waiting: "Очікування сканування…",

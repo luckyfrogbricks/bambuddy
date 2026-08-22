@@ -6551,6 +6551,11 @@ export default {
   // SpoolBuddy Kiosk
   spoolbuddy: {
     barcode: {
+      location: '位置',
+      lastUsed: '上次使用',
+      noLocation: '无位置',
+      newLocation: '新建…',
+      newLocationPlaceholder: '新位置名称…',
       scanTitle: "扫描条码以添加",
       scanHint: "将零售条码对准 SpoolBuddy 的扫描口。",
       waiting: "等待扫描…",

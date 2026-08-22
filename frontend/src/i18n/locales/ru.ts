@@ -6198,6 +6198,11 @@ export default {
   },
   spoolbuddy: {
     barcode: {
+      location: 'Расположение',
+      lastUsed: 'последнее',
+      noLocation: 'Без расположения',
+      newLocation: 'Новое…',
+      newLocationPlaceholder: 'Название нового расположения…',
       scanTitle: "Сканируйте штрих-код для добавления",
       scanHint: "Поднесите штрих-код с упаковки к окошку сканера на SpoolBuddy.",
       waiting: "Ожидание сканирования…",

@@ -6564,6 +6564,11 @@ export default {
   // SpoolBuddy Kiosk
   spoolbuddy: {
     barcode: {
+      location: '保管場所',
+      lastUsed: '前回使用',
+      noLocation: '保管場所なし',
+      newLocation: '新規…',
+      newLocationPlaceholder: '新しい保管場所の名前…',
       scanTitle: "バーコードをスキャンして追加",
       scanHint: "小売バーコードをSpoolBuddyのスキャナーポートの前にかざしてください。",
       waiting: "スキャン待ち…",
