@@ -208,7 +208,6 @@ class NFCReader:
                 self._state = NFCState.IDLE
                 self._current_uid = None
                 self._current_sak = None
-                logger.info("Tag swapped: %s -> %s", old_uid, uid_hex)
                 return "tag_removed", {"tag_uid": old_uid}
 
             if self._state == NFCState.IDLE:
