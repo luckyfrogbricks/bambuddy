@@ -12,6 +12,7 @@ override knob; the scanner is auto-detected by name.)
 """
 
 import logging
+import re
 import select
 import time
 
@@ -66,6 +67,22 @@ _AIM_FAMILIES = {
 }
 
 
+# 2D symbologies never carry product codes on filament boxes — the Bambu
+# spool QR is a URL — so scans of them are dropped outright (with AIM IDs
+# enabled the scanner tells us; without them the URL shape below catches the
+# common case).
+IGNORED_SYMBOLOGIES = ("qr", "datamatrix")
+
+# URL-shaped payloads. The optional colon matters: HID keymaps that can't
+# type ":" decode the Bambu QR as "HTTPS//E.BAMBULAB.COM/…".
+_URL_PAYLOAD_RE = re.compile(r"(?i)^\s*(https?:?//|www\.)")
+
+
+def looks_like_url_payload(code: str) -> bool:
+    """True when a decoded scan is a URL (a QR payload), not a product code."""
+    return bool(_URL_PAYLOAD_RE.match(code)) or "://" in code
+
+
 def split_aim_prefix(code: str) -> tuple[str | None, str]:
     """Split a leading AIM symbology identifier off a decoded scan.
 
@@ -96,6 +113,8 @@ def _build_keycode_map(codes) -> dict[int, tuple[str, str]]:
     # "]" opens the AIM symbology identifier (e.g. "]E0") — without this the
     # prefix would decode as a bare "E0" glued onto the barcode digits.
     keymap[codes.KEY_RIGHTBRACE] = ("]", "}")
+    # ":" so URL payloads (QR codes) decode faithfully for the ignore filter.
+    keymap[codes.KEY_SEMICOLON] = (";", ":")
     keymap[codes.KEY_DOT] = (".", ">")
     keymap[codes.KEY_SLASH] = ("/", "?")
     keymap[codes.KEY_EQUAL] = ("=", "+")
@@ -291,7 +310,9 @@ class BarcodeReader:
 
             if code:
                 symbology, code = split_aim_prefix(code)
-                if self._accept(code):
+                if symbology in IGNORED_SYMBOLOGIES or looks_like_url_payload(code):
+                    logger.debug("Ignoring 2D/URL scan: %s", code)
+                elif self._accept(code):
                     logger.info("Barcode scanned: %s", code)
                     try:
                         await on_scan(code, symbology)

@@ -15,6 +15,7 @@ from backend.app.schemas.spool import (
     SpoolResponse,
     SpoolUpdate,
     classify_code,
+    looks_like_url_payload,
     normalize_barcode,
 )
 
@@ -49,6 +50,29 @@ class TestNormalizeBarcode:
 
     def test_sku_is_trimmed_and_uppercased(self):
         assert normalize_barcode("  alzmntabs01  ") == "ALZMNTABS01"
+
+
+class TestLooksLikeUrlPayload:
+    def test_bambu_qr_colonless_form(self):
+        # HID keymaps that can't type ":" decode the Bambu spool QR like this.
+        assert looks_like_url_payload("HTTPS//E.BAMBULAB.COM/T?C=SMY5WWK01KBZL4RN") is True
+
+    def test_full_https_url(self):
+        assert looks_like_url_payload("https://example.com/x") is True
+
+    def test_www_form(self):
+        assert looks_like_url_payload("www.example.com") is True
+
+    def test_gtin_is_not_url(self):
+        assert looks_like_url_payload("6938936716785") is False
+
+    def test_sku_and_user_codes_are_not_urls(self):
+        assert looks_like_url_payload("ALZMNTABS01") is False
+        assert looks_like_url_payload("MyShelf-a42") is False
+
+    def test_none_and_empty(self):
+        assert looks_like_url_payload(None) is False
+        assert looks_like_url_payload("") is False
 
 
 class TestClassifyCode:

@@ -108,6 +108,39 @@ class TestBarcodeScanned:
         assert payload["material"] is None
 
     @pytest.mark.asyncio
+    async def test_url_payload_is_ignored_without_broadcast(self):
+        # The Bambu spool QR decodes as a URL (colon-less through the HID
+        # keymap) — never a product code, so no resolution and no modal.
+        req = BarcodeScannedRequest(device_id="sb-1", barcode="HTTPS//E.BAMBULAB.COM/T?C=SMY5WWK0")
+        db = _db_returning(_device())
+        resolve = AsyncMock()
+
+        with (
+            patch("backend.app.services.barcode_resolver.resolve_barcode", new=resolve),
+            patch("backend.app.api.routes.spoolbuddy.ws_manager.broadcast", new=AsyncMock()) as mock_bcast,
+        ):
+            out = await barcode_scanned(req=req, db=db, _=None)
+
+        assert out == {"status": "ok", "matched": False, "ignored": True}
+        resolve.assert_not_awaited()
+        mock_bcast.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_qr_symbology_is_ignored_even_with_plain_payload(self):
+        # AIM says the symbol was a QR code — drop regardless of content.
+        req = BarcodeScannedRequest(device_id="sb-1", barcode="6938936716785", symbology="qr")
+        db = _db_returning(_device())
+
+        with (
+            _patch_resolution({}, None, []),
+            patch("backend.app.api.routes.spoolbuddy.ws_manager.broadcast", new=AsyncMock()) as mock_bcast,
+        ):
+            out = await barcode_scanned(req=req, db=db, _=None)
+
+        assert out.get("ignored") is True
+        mock_bcast.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_code128_symbology_demotes_lucky_checksum_numeric(self):
         # 06938936716785 passes the GTIN checksum, but the scanner read it
         # from a Code 128 symbol — an arbitrary wrapped numeric (lot number),

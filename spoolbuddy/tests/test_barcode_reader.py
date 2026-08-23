@@ -37,6 +37,7 @@ _KEYS = {
     "KEY_SLASH": 53,
     "KEY_SPACE": 57,
     "KEY_RIGHTBRACE": 27,
+    "KEY_SEMICOLON": 39,
 }
 # Letters KEY_A..KEY_Z on a US layout are not contiguous; explicit map.
 _LETTER_CODES = {
@@ -88,6 +89,8 @@ for d in "1234567890":
 for letter, code in _LETTER_CODES.items():
     _CHAR_TO_CODE[letter.lower()] = code
 _CHAR_TO_CODE["]"] = ECODES.KEY_RIGHTBRACE
+_CHAR_TO_CODE["/"] = ECODES.KEY_SLASH
+_CHAR_TO_CODE["."] = ECODES.KEY_DOT
 
 
 class FakeEvent:
@@ -233,6 +236,28 @@ class TestSplitAimPrefix:
         assert r._drain() == "]E06975337031234"
 
 
+# --- QR / URL payload ignore -------------------------------------------------
+
+
+class TestUrlPayloadIgnore:
+    def test_bambu_qr_without_colon_is_url(self):
+        # Real-world shape: HID keymaps without ":" decode the Bambu spool QR
+        # colon-less.
+        assert br.looks_like_url_payload("HTTPS//E.BAMBULAB.COM/T?C=SMY5WWK01KBZL4RN") is True
+
+    def test_full_url_is_url(self):
+        assert br.looks_like_url_payload("https://example.com/x") is True
+
+    def test_www_is_url(self):
+        assert br.looks_like_url_payload("www.example.com") is True
+
+    def test_gtin_is_not_url(self):
+        assert br.looks_like_url_payload("6975337031234") is False
+
+    def test_user_code_with_slash_free_shape_is_not_url(self):
+        assert br.looks_like_url_payload("MyShelf-a42") is False
+
+
 # --- Accept / debounce / length -------------------------------------------
 
 
@@ -338,6 +363,30 @@ class TestRunLoop:
         except asyncio.CancelledError:
             pass
         assert scanned == [("6975337031234", "ean-upc")]
+
+    @pytest.mark.asyncio
+    async def test_qr_and_url_scans_are_dropped_but_loop_continues(self, patched_evdev):
+        dev = FakeInputDevice()
+        dev.enqueue_scan("]Q1HTTPS//E.BAMBULAB.COM/TCX")  # AIM says QR
+        dev.enqueue_scan("HTTPS//E.BAMBULAB.COM/TCY")  # no AIM, URL shape
+        dev.enqueue_scan("6975337031234")  # real barcode still gets through
+        r = BarcodeReader()
+        r._device = dev
+        r._keymap = br._build_keycode_map(ECODES)
+        r.ok = True
+        r._wait_readable = lambda timeout: True
+
+        scanned = []
+        on_scan = AsyncMock(side_effect=lambda code, symbology: scanned.append((code, symbology)))
+
+        task = asyncio.create_task(r.run(on_scan))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert scanned == [("6975337031234", None)]
 
     @pytest.mark.asyncio
     async def test_disabled_releases_grab(self, patched_evdev):

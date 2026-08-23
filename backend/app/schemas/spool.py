@@ -129,6 +129,27 @@ _ASIN_RE = re.compile(r"^B0[A-Z0-9]{8}$")
 # EAN/UPC symbols encode nothing else, and ITF-14 case codes wrap a GTIN.
 _GTIN_SYMBOLOGIES = ("ean-upc", "itf")
 
+# 2D symbologies never carry product codes on filament boxes (the Bambu spool
+# QR is a URL) — the scan endpoint drops these outright.
+IGNORED_SYMBOLOGIES = ("qr", "datamatrix")
+
+# URL-shaped scan payloads. The optional colon matters: the daemon's HID
+# keymap historically couldn't type ":", so the Bambu QR arrived as
+# "HTTPS//E.BAMBULAB.COM/…".
+_URL_PAYLOAD_RE = re.compile(r"(?i)^\s*(https?:?//|www\.)")
+
+
+def looks_like_url_payload(raw: str | None) -> bool:
+    """True when a scanned payload is a URL (a QR code), not a product code.
+
+    Mirrors the daemon-side filter (spoolbuddy/daemon/barcode_reader.py) so
+    older daemons — or any other caller of the scan endpoint — get the same
+    behavior: URL scans are ignored, never surfaced as a no-match modal.
+    """
+    if not raw:
+        return False
+    return bool(_URL_PAYLOAD_RE.match(raw)) or "://" in raw
+
 
 def classify_code(raw: str | None, symbology: str | None = None) -> tuple[str, str]:
     """Canonicalize `raw` exactly like `normalize_barcode`, then classify it

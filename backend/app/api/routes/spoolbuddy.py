@@ -410,6 +410,14 @@ async def barcode_scanned(
         # grab within one heartbeat of the toggle turning off).
         return {"status": "ok", "matched": False, "ignored": True}
 
+    from backend.app.schemas.spool import IGNORED_SYMBOLOGIES, looks_like_url_payload
+
+    if req.symbology in IGNORED_SYMBOLOGIES or looks_like_url_payload(req.barcode):
+        # QR/DataMatrix payloads (the Bambu spool QR is a URL) are never
+        # product codes — drop silently instead of popping a no-match modal.
+        logger.debug("Ignoring 2D/URL scan: %s", req.barcode)
+        return {"status": "ok", "matched": False, "ignored": True}
+
     canonical, kind = classify_code(req.barcode, symbology=req.symbology)
     valid = bool(canonical) and len(canonical) >= 3
 
