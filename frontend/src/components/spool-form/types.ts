@@ -1,5 +1,5 @@
 
-import type { LinkedCode, Printer, SpoolKProfile } from '../../api/client';
+import type { Printer, SpoolKProfile } from '../../api/client';
 
 // Which operation the spool form is performing. Lives here (rather than in
 // SpoolFormModal) so validateForm can key off it without a circular import;
@@ -45,10 +45,13 @@ export interface SpoolFormData {
   // When set the spool is linked to a specific Spoolman filament catalog entry;
   // the backend skips find_or_create_filament() and uses this ID directly.
   spoolman_filament_id: number | null;
-  // Scanned UPC/EAN, populated automatically by the scan-to-add barcode/label
-  // flow, or entered manually to teach the native barcode lookup a mapping
-  // ahead of time. Optional and editable — not tied to any single source.
-  barcode: string;
+  // Typed code fields. gtin_code: the retail barcode only (auto-filled by
+  // scan-to-add, or entered manually to teach the lookup a mapping ahead of
+  // time). sku_code / asin_code: the manufacturer article number / Amazon
+  // ASIN, auto-filled from the community cross-reference and editable.
+  gtin_code: string;
+  asin_code: string;
+  sku_code: string;
 }
 
 export const defaultFormData: SpoolFormData = {
@@ -70,7 +73,9 @@ export const defaultFormData: SpoolFormData = {
   low_stock_threshold_pct: null,
   location_id: null,
   spoolman_filament_id: null,
-  barcode: '',
+  gtin_code: '',
+  asin_code: '',
+  sku_code: '',
 };
 
 // Printer with calibrations type
@@ -168,14 +173,12 @@ export interface AdditionalSectionProps extends SectionProps {
   // When true the empty-spool weight is managed by Spoolman on the filament
   // object, so SpoolWeightPicker is hidden and an info notice is shown instead.
   spoolmanMode?: boolean;
-  // Sibling GTIN/SKU codes discovered by cross-referencing OFD/SpoolmanDB-Community
-  // against the primary Barcode field's value (see services/barcode_resolver.py)
-  // — read-only display only, never submitted with the form.
-  linkedCodes?: LinkedCode[];
-  // Whether the spool's primary barcode is the no-spool "refill" variant —
-  // read-only badge next to the Barcode label when editing (set at scan/create
-  // time; the update path intentionally resets it on a barcode change).
-  isRefill?: boolean;
+  // How the spool was purchased (refill coil vs boxed with spool) —
+  // read-only badge next to the GTIN label when editing.
+  boughtAsRefill?: boolean;
+  // The user's own code space (set by scanning an unrecognized code) —
+  // shown read-only when present.
+  otherCode?: string | null;
 }
 
 // PA Profile section props

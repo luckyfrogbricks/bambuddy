@@ -440,7 +440,10 @@ export function SpoolBuddyDashboard() {
           tray_uuid: null,
           data_origin: null,
           tag_type: null,
-          barcode: null,
+          gtin_code: null,
+          asin_code: null,
+          sku_code: null,
+          other_code: null,
           cost_per_kg: null,
           last_scale_weight: weight !== null ? Math.round(weight) : null,
           last_weighed_at: weight !== null ? new Date().toISOString() : null,
@@ -476,7 +479,10 @@ export function SpoolBuddyDashboard() {
           tray_uuid: null,
           data_origin: 'spoolbuddy',
           tag_type: 'generic',
-          barcode: null,
+          gtin_code: null,
+          asin_code: null,
+          sku_code: null,
+          other_code: null,
           cost_per_kg: null,
           last_scale_weight: weight !== null ? Math.round(weight) : null,
           last_weighed_at: weight !== null ? new Date().toISOString() : null,
@@ -697,8 +703,8 @@ export function SpoolBuddyDashboard() {
                       label_weight: s.label_weight,
                       core_weight: s.core_weight,
                       weight_used: s.weight_used,
-                      // Only the list-sourced spool carries is_refill; matchedSpool doesn't.
-                      is_refill: displayedSpool?.is_refill ?? false,
+                      // Only the list-sourced spool carries the flag; matchedSpool doesn't.
+                      bought_as_refill: displayedSpool?.bought_as_refill ?? false,
                     };
                   })()}
                   scaleWeight={liveWeight ?? displayedWeight}

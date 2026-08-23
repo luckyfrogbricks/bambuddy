@@ -372,9 +372,11 @@ export function SpoolFormModal({
           location_id: spool.location_id ?? null,
           spoolman_filament_id: null,
           // A copy represents a new, not-yet-scanned physical spool — carrying
-          // over the source's barcode would make it falsely resolve to this
+          // over the source's codes would make it falsely resolve to this
           // copy on a later scan of the original item.
-          barcode: isCopying ? '' : (spool.barcode || ''),
+          gtin_code: isCopying ? '' : (spool.gtin_code || ''),
+          asin_code: isCopying ? '' : (spool.asin_code || ''),
+          sku_code: isCopying ? '' : (spool.sku_code || ''),
         });
         setPresetInputValue(spool.slicer_filament_name || spool.slicer_filament || '');
 
@@ -768,7 +770,9 @@ export function SpoolFormModal({
       cost_per_kg: formData.cost_per_kg,
       category: formData.category.trim() || null,
       low_stock_threshold_pct: formData.low_stock_threshold_pct,
-      barcode: formData.barcode.trim() || null,
+      gtin_code: formData.gtin_code.trim() || null,
+      asin_code: formData.asin_code.trim() || null,
+      sku_code: formData.sku_code.trim() || null,
       ...(spoolmanMode ? { spoolman_filament_id: formData.spoolman_filament_id } : {}),
     };
 
@@ -972,8 +976,8 @@ export function SpoolFormModal({
                   }}
                   globalLowStockThreshold={globalLowStockThreshold}
                   spoolmanMode={spoolmanMode}
-                  linkedCodes={isEditing ? spool?.linked_codes : undefined}
-                  isRefill={isEditing ? spool?.is_refill : undefined}
+                  boughtAsRefill={isEditing ? spool?.bought_as_refill : undefined}
+                  otherCode={isEditing ? spool?.other_code : undefined}
                 />
               </div>
 

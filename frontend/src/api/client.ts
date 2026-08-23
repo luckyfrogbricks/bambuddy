@@ -3426,18 +3426,22 @@ export interface InventorySpool {
   tray_uuid: string | null;
   data_origin: string | null;
   tag_type: string | null;
-  // Scanned UPC/EAN (canonicalized, no leading zeros) — set by the scan-to-add
-  // barcode/label flow so a later scan of the same barcode resolves from the
-  // user's own inventory before falling back to the Open Filament Database.
-  barcode: string | null;
-  // Write-only hint on create: whether the primary `barcode` is the "refill"
-  // (no-spool) variant. The community DBs mark this via eans_refill/spool_refill,
-  // but a user-linked or manually-typed code has no such signal, so the SpoolBuddy
-  // scan flow lets the user set it. Persisted onto the barcode's SpoolCode row.
-  barcode_is_refill?: boolean;
-  // Read-only echo of that flag (from the primary SpoolCode) — drives the
-  // "Refill" badge in the inventory list and the SpoolBuddy Current Spool panel.
-  is_refill?: boolean;
+  // Typed code columns. gtin_code holds retail barcodes ONLY (canonicalized,
+  // checksum-valid); sku_code the manufacturer article number; asin_code an
+  // Amazon ASIN; other_code the user's own code space (no semantics imposed,
+  // never submitted to a community DB). Any stored code resolves a later scan
+  // from the user's own inventory before the community databases.
+  gtin_code: string | null;
+  asin_code: string | null;
+  sku_code: string | null;
+  other_code: string | null;
+  // Write-only on create: the raw code a scanner read. The backend classifies
+  // it (GTIN / ASIN / SKU-candidate / other) and cross-fills the sibling
+  // columns from the community DBs under the size-consistency rule.
+  scanned_code?: string | null;
+  // How the roll was PURCHASED (refill coil vs boxed with a spool) — not
+  // current physical state (that's core_weight). Drives the "Refill pack" badge.
+  bought_as_refill?: boolean;
   archived_at: string | null;
   created_at: string;
   updated_at: string;
@@ -3450,7 +3454,6 @@ export interface InventorySpool {
   k_profiles?: SpoolKProfile[];
   storage_location?: string | null;
   location_id?: number | null;
-  linked_codes?: LinkedCode[];
 }
 
 // Scan-to-add barcode lookup (#1). `source` tells the caller how much to

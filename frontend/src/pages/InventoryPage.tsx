@@ -238,7 +238,7 @@ const columnCells: Record<string, (ctx: CellCtx) => ReactNode> = {
   material: ({ spool }) => (
     <span className="inline-flex items-center gap-1.5 text-sm text-white">
       {spool.material}
-      {spool.is_refill && <RefillBadge />}
+      {spool.bought_as_refill && <RefillBadge />}
     </span>
   ),
   subtype: ({ spool }) => (
@@ -319,10 +319,13 @@ const columnCells: Record<string, (ctx: CellCtx) => ReactNode> = {
     );
   },
   barcode: ({ spool }) => {
-    if (!spool.barcode) return <span className="text-sm text-bambu-gray/50">-</span>;
+    // One column shows every stored code so the table stays compact; the
+    // typed breakdown lives in the edit form.
+    const codes = [spool.gtin_code, spool.sku_code, spool.asin_code, spool.other_code].filter(Boolean);
+    if (codes.length === 0) return <span className="text-sm text-bambu-gray/50">-</span>;
     return (
-      <span className="text-sm text-bambu-gray font-mono" title={spool.barcode}>
-        {spool.barcode}
+      <span className="text-sm text-bambu-gray font-mono" title={codes.join(' \u2022 ')}>
+        {codes.join(' \u2022 ')}
       </span>
     );
   },
@@ -447,7 +450,7 @@ const columnSortValues: Record<string, (spool: InventorySpool, assignmentMap: Re
   used: (s) => s.weight_used,
   remaining: (s) => s.label_weight > 0 ? Math.max(0, s.label_weight - s.weight_used) / s.label_weight : 0,
   note: (s) => (s.note || '').toLowerCase(),
-  barcode: (s) => s.barcode || '',
+  barcode: (s) => s.gtin_code || s.sku_code || s.asin_code || s.other_code || '',
   data_origin: (s) => (s.data_origin || '').toLowerCase(),
   tag_type: (s) => (s.tag_type || '').toLowerCase(),
   stock: (s) => s.slicer_filament ? 1 : 0,
@@ -2476,7 +2479,7 @@ function SpoolCard({
           <div>
             <h3 className="font-semibold text-white flex flex-wrap items-center gap-1.5">
               <span>{spool.material}{spool.subtype ? ` ${spool.subtype}` : ''}</span>
-              {spool.is_refill && <RefillBadge />}
+              {spool.bought_as_refill && <RefillBadge />}
             </h3>
             <p className="text-sm text-bambu-gray">{spool.brand || '-'}</p>
           </div>

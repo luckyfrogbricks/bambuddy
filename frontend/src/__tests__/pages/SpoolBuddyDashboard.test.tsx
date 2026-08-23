@@ -36,6 +36,8 @@ vi.mock('../../api/client', () => ({
     linkTagToSpool: vi.fn().mockResolvedValue({}),
     linkTagToSpoolmanSpool: vi.fn().mockResolvedValue({}),
     createSpool: vi.fn().mockResolvedValue({ id: 4 }),
+    getLocations: vi.fn().mockResolvedValue([]),
+    createLocation: vi.fn(),
     createSpoolmanInventorySpool: vi.fn().mockResolvedValue({ id: 4 }),
     clearPlate: vi.fn().mockResolvedValue({}),
   },

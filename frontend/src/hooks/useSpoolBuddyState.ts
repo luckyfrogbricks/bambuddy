@@ -12,8 +12,8 @@ export interface MatchedSpool {
   label_weight: number;
   core_weight: number;
   weight_used: number;
-  /** Whether the spool's primary barcode is the no-spool "refill" variant. */
-  is_refill?: boolean;
+  /** How the roll was purchased (refill coil vs boxed with a spool). */
+  bought_as_refill?: boolean;
 }
 
 export type { LinkedCode } from '../api/client';

@@ -104,13 +104,15 @@ describe('BarcodeAddModal', () => {
 
     await waitFor(() => expect(api.createSpool).toHaveBeenCalledTimes(1));
     const payload = (api.createSpool as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(payload.barcode).toBe('6975337031234');
+    expect(payload.scanned_code).toBe('6975337031234');
     expect(payload.material).toBe('PLA');
     expect(payload.tag_uid).toBe('0C1C8364');
     expect(payload.data_origin).toBe('barcode_scan');
+    // A plain scan defers all code routing to the backend — no explicit codes.
+    expect(payload.gtin_code).toBeNull();
   });
 
-  it('marks the spool as a refill (barcode_is_refill + zero core weight) when the toggle is on', async () => {
+  it('marks the spool as bought-as-refill (+ zero core weight) when the toggle is on', async () => {
     render(
       <BarcodeAddModal {...baseProps} scan={makeScan()} tagUid="0C1C8364" scaleWeight={1247} />,
     );
@@ -120,7 +122,7 @@ describe('BarcodeAddModal', () => {
 
     await waitFor(() => expect(api.createSpool).toHaveBeenCalledTimes(1));
     const payload = (api.createSpool as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(payload.barcode_is_refill).toBe(true);
+    expect(payload.bought_as_refill).toBe(true);
     expect(payload.core_weight).toBe(0);
   });
 
@@ -135,7 +137,7 @@ describe('BarcodeAddModal', () => {
 
     await waitFor(() => expect(api.createSpool).toHaveBeenCalledTimes(1));
     const payload = (api.createSpool as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(payload.barcode_is_refill).toBe(true);
+    expect(payload.bought_as_refill).toBe(true);
     expect(payload.core_weight).toBe(0);
   });
 

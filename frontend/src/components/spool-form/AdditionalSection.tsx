@@ -179,8 +179,8 @@ export function AdditionalSection({
   onCreateLocation,
   globalLowStockThreshold,
   spoolmanMode = false,
-  linkedCodes = [],
-  isRefill = false,
+  boughtAsRefill = false,
+  otherCode = null,
 }: AdditionalSectionProps) {
   const { t } = useTranslation();
   const { showToast } = useToast();
@@ -375,39 +375,70 @@ export function AdditionalSection({
         </p>
       </div>
 
-      {/* Barcode — auto-filled by Scan to Add (scan/photo/manual, matched from
-          inventory or the Open Filament Database), or entered here manually
-          to teach the native lookup a mapping ahead of time. */}
+      {/* Typed code fields — auto-filled by Scan to Add (matched from
+          inventory or the community databases), or entered manually to teach
+          the native lookup a mapping ahead of time. All are searchable. */}
       <div>
         <label
           className="inline-flex items-center gap-1.5 text-sm font-medium text-bambu-gray mb-1"
-          htmlFor="spool-barcode"
+          htmlFor="spool-gtin-code"
         >
-          {t('inventory.barcode', 'Barcode')}
-          {isRefill && <RefillBadge />}
+          {t('inventory.gtinCode', 'GTIN')}
+          {boughtAsRefill && <RefillBadge />}
         </label>
         <input
-          id="spool-barcode"
+          id="spool-gtin-code"
           type="text"
           className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white text-sm font-mono placeholder:text-bambu-gray/50 placeholder:font-sans focus:outline-none focus:border-bambu-green"
-          placeholder={t('inventory.barcodePlaceholder', 'e.g. 6938936716785')}
-          value={formData.barcode}
+          placeholder={t('inventory.gtinCodePlaceholder', 'Retail barcode, e.g. 6938936716785')}
+          value={formData.gtin_code}
           maxLength={64}
-          onChange={(e) => updateField('barcode', e.target.value)}
+          onChange={(e) => updateField('gtin_code', e.target.value)}
         />
         <p className="text-xs text-bambu-gray mt-1">
-          {t('inventory.barcodeHelp', 'Filled in automatically by Scan Barcode. Enter one manually so a future scan of the same code matches this spool instantly.')}
+          {t(
+            'inventory.gtinCodeHelp',
+            'Filled in automatically by Scan Barcode. A future scan of any code below matches this spool instantly.',
+          )}
         </p>
-        {linkedCodes.length > 0 && (
-          <p className="text-xs text-bambu-gray mt-1 font-mono">
-            {t('inventory.linkedCodesLabel', 'Also matches: {{codes}}', {
-              codes: linkedCodes
-                .map((c) => (c.is_refill ? `${c.code} (${t('inventory.linkedCodesRefill', 'refill')})` : c.code))
-                .join(', '),
-            })}
-          </p>
-        )}
       </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-sm font-medium text-bambu-gray mb-1" htmlFor="spool-sku-code">
+            {t('inventory.skuCode', 'SKU')}
+          </label>
+          <input
+            id="spool-sku-code"
+            type="text"
+            className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white text-sm font-mono placeholder:text-bambu-gray/50 placeholder:font-sans focus:outline-none focus:border-bambu-green"
+            placeholder={t('inventory.skuCodePlaceholder', 'e.g. 17600')}
+            value={formData.sku_code}
+            maxLength={64}
+            onChange={(e) => updateField('sku_code', e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-bambu-gray mb-1" htmlFor="spool-asin-code">
+            {t('inventory.asinCode', 'ASIN')}
+          </label>
+          <input
+            id="spool-asin-code"
+            type="text"
+            className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white text-sm font-mono placeholder:text-bambu-gray/50 placeholder:font-sans focus:outline-none focus:border-bambu-green"
+            placeholder={t('inventory.asinCodePlaceholder', 'e.g. B0CJLR62MF')}
+            value={formData.asin_code}
+            maxLength={16}
+            onChange={(e) => updateField('asin_code', e.target.value)}
+          />
+        </div>
+      </div>
+
+      {otherCode && (
+        <p className="text-xs text-bambu-gray font-mono">
+          {t('inventory.otherCodeLabel', 'Custom code:')} {otherCode}
+        </p>
+      )}
 
       {/* Note */}
       <div>

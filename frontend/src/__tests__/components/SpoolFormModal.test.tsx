@@ -1192,12 +1192,12 @@ describe('SpoolFormModal header spool ID (#1385)', () => {
 // ---------------------------------------------------------------------------
 // Barcode field (scan-to-add support)
 // ---------------------------------------------------------------------------
-describe('SpoolFormModal barcode field', () => {
+describe('SpoolFormModal code fields', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('sends a null barcode for a normal manual create', async () => {
+  it('sends null code fields for a normal manual create', async () => {
     render(
       <SpoolFormModal
         isOpen={true}
@@ -1220,10 +1220,12 @@ describe('SpoolFormModal barcode field', () => {
     });
 
     const [payload] = vi.mocked(api.createSpool).mock.calls[0] as [Record<string, unknown>];
-    expect(payload).toHaveProperty('barcode', null);
+    expect(payload).toHaveProperty('gtin_code', null);
+    expect(payload).toHaveProperty('sku_code', null);
+    expect(payload).toHaveProperty('asin_code', null);
   });
 
-  it('sends a null barcode when editing a spool that has none', async () => {
+  it('sends null code fields when editing a spool that has none', async () => {
     render(
       <SpoolFormModal
         isOpen={true}
@@ -1246,17 +1248,18 @@ describe('SpoolFormModal barcode field', () => {
     });
 
     const [, payload] = vi.mocked(api.updateSpool).mock.calls[0] as [number, Record<string, unknown>];
-    // barcode is a normal editable field — always sent, null since
+    // The code fields are normal editable fields — always sent, null since
     // existingSpool has none set.
-    expect(payload).toHaveProperty('barcode', null);
+    expect(payload).toHaveProperty('gtin_code', null);
+    expect(payload).toHaveProperty('sku_code', null);
   });
 
-  it('prefills the barcode field from an existing spool when editing', async () => {
+  it('prefills the code fields from an existing spool when editing', async () => {
     render(
       <SpoolFormModal
         isOpen={true}
         onClose={vi.fn()}
-        spool={{ ...existingSpool, barcode: '6938936716785' }}
+        spool={{ ...existingSpool, gtin_code: '6938936716785', sku_code: '17600' }}
         mode="edit"
         currencySymbol="$"
       />
@@ -1267,6 +1270,7 @@ describe('SpoolFormModal barcode field', () => {
     });
 
     expect(screen.getByDisplayValue('6938936716785')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('17600')).toBeInTheDocument();
   });
 
   it('shows the Refill badge when editing a refill spool, and not otherwise', async () => {
@@ -1274,7 +1278,7 @@ describe('SpoolFormModal barcode field', () => {
       <SpoolFormModal
         isOpen={true}
         onClose={vi.fn()}
-        spool={{ ...existingSpool, barcode: '6938936716785', is_refill: true }}
+        spool={{ ...existingSpool, gtin_code: '6938936716785', bought_as_refill: true }}
         mode="edit"
         currencySymbol="$"
       />
@@ -1289,7 +1293,7 @@ describe('SpoolFormModal barcode field', () => {
       <SpoolFormModal
         isOpen={true}
         onClose={vi.fn()}
-        spool={{ ...existingSpool, barcode: '6938936716785', is_refill: false }}
+        spool={{ ...existingSpool, gtin_code: '6938936716785', bought_as_refill: false }}
         mode="edit"
         currencySymbol="$"
       />
@@ -1297,12 +1301,12 @@ describe('SpoolFormModal barcode field', () => {
     expect(screen.queryByText('Refill pack')).not.toBeInTheDocument();
   });
 
-  it('clears the barcode field when copying a spool — a copy is a new, unscanned physical item', async () => {
+  it('clears the code fields when copying a spool — a copy is a new, unscanned physical item', async () => {
     render(
       <SpoolFormModal
         isOpen={true}
         onClose={vi.fn()}
-        spool={{ ...existingSpool, barcode: '6938936716785' }}
+        spool={{ ...existingSpool, gtin_code: '6938936716785', sku_code: '17600' }}
         mode="copy"
         currencySymbol="$"
       />
@@ -1313,5 +1317,6 @@ describe('SpoolFormModal barcode field', () => {
     });
 
     expect(screen.queryByDisplayValue('6938936716785')).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue('17600')).not.toBeInTheDocument();
   });
 });

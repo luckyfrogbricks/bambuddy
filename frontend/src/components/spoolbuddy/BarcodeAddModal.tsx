@@ -16,6 +16,9 @@ import { getDefaultCoreWeight } from './coreWeight';
 
 type Step = 'waiting' | 'manual' | 'looking_up' | 'confirm' | 'no_match' | 'find';
 
+// Modern Amazon ASIN shape — mirrors the backend classifier's heuristic.
+const ASIN_RE = /^B0[A-Z0-9]{8}$/;
+
 // A resolved filament ready to preview/create. Barcode-derived scans, manual
 // lookups, and catalog picks all normalize to this shape.
 interface Resolved {
@@ -101,6 +104,9 @@ export function BarcodeAddModal({
   const [busy, setBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [linkedByUser, setLinkedByUser] = useState(false);
+  // The picked Find row's own per-package codes — stored explicitly on
+  // create (a plain scan instead defers all code routing to the backend).
+  const [pickedCodes, setPickedCodes] = useState<LinkedCode[] | null>(null);
   // Storage location for the new spool. Defaults to the last added spool's
   // location (see lastUsedLocation); the picker expands inline on the confirm
   // screen so the happy path stays zero-tap.
@@ -153,6 +159,7 @@ export function BarcodeAddModal({
     setInvalidCode(null);
     setLinkedByUser(false);
     setCameFromFind(false);
+    setPickedCodes(null);
     // Auto-arm the refill toggle when the resolved code is itself a known refill
     // (community DBs flag it); the user can still override on the confirm screen.
     setIsRefill(r.is_refill);
@@ -284,7 +291,11 @@ export function BarcodeAddModal({
         label_weight: s.label_weight,
         nozzle_temp_min: s.nozzle_temp_min ?? null,
         nozzle_temp_max: s.nozzle_temp_max ?? null,
-        codes: s.barcode ? [{ code: s.barcode, kind: 'gtin', is_refill: false }] : [],
+        codes: [
+          ...(s.gtin_code ? [{ code: s.gtin_code, kind: 'gtin' as const, is_refill: !!s.bought_as_refill }] : []),
+          ...(s.sku_code ? [{ code: s.sku_code, kind: 'sku' as const, is_refill: !!s.bought_as_refill }] : []),
+          ...(s.asin_code ? [{ code: s.asin_code, kind: 'sku' as const, is_refill: !!s.bought_as_refill }] : []),
+        ],
       }));
   }, [findQuery, spools]);
 
@@ -336,6 +347,7 @@ export function BarcodeAddModal({
         linked_codes: row.codes,
       }));
       setLinkedByUser(true);
+      setPickedCodes(row.codes);
       // Prefill refill-ness from the picked catalog row if it's known there
       // (its codes carry is_refill); otherwise leave the user's toggle as-is.
       if (row.codes.length && row.codes.every((c) => c.is_refill)) setIsRefill(true);
@@ -387,8 +399,18 @@ export function BarcodeAddModal({
         tray_uuid: null,
         data_origin: 'barcode_scan',
         tag_type: !spoolmanMode && useTag ? 'generic' : null,
-        barcode: r.barcode || null,
-        barcode_is_refill: isRefill,
+        // The raw scanned code — the backend classifies it down the ladder
+        // (GTIN/ASIN/SKU/other) and cross-fills siblings size-consistently.
+        scanned_code: r.barcode || null,
+        // Explicit typed codes ONLY from a Find pick: those rows are
+        // per-package by construction, so their codes are safe to store.
+        // A plain scan's linked_codes may span package sizes (OFD variants),
+        // so routing is left entirely to the backend there.
+        gtin_code: pickedCodes?.find((c) => c.kind === 'gtin')?.code ?? null,
+        sku_code: pickedCodes?.find((c) => c.kind === 'sku' && !ASIN_RE.test(c.code))?.code ?? null,
+        asin_code: pickedCodes?.find((c) => c.kind === 'sku' && ASIN_RE.test(c.code))?.code ?? null,
+        other_code: null,
+        bought_as_refill: isRefill,
         cost_per_kg: null,
         last_scale_weight: weight !== null ? Math.round(weight) : null,
         last_weighed_at: weight !== null ? new Date().toISOString() : null,
@@ -397,7 +419,7 @@ export function BarcodeAddModal({
         location_id: locationId,
       };
     },
-    [coreWeight, isRefill, locationId, scaleWeight, spoolmanMode, tagUid],
+    [coreWeight, isRefill, locationId, pickedCodes, scaleWeight, spoolmanMode, tagUid],
   );
 
   const selectLocation = useCallback((id: number | null, name: string | null) => {
