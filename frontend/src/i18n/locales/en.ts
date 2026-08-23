@@ -6618,6 +6618,8 @@ export default {
       noLocation: 'No location',
       newLocation: 'New…',
       newLocationPlaceholder: 'New location name…',
+      details: 'Details',
+      nozzleTemp: 'Nozzle temp',
       scanTitle: 'Scan Barcode to Add',
       scanHint: 'Hold the retail barcode in front of the scanner port on SpoolBuddy.',
       waiting: 'Waiting for scan…',

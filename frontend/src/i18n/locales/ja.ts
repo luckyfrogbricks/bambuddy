@@ -6569,6 +6569,8 @@ export default {
       noLocation: '保管場所なし',
       newLocation: '新規…',
       newLocationPlaceholder: '新しい保管場所の名前…',
+      details: '詳細',
+      nozzleTemp: 'ノズル温度',
       scanTitle: "バーコードをスキャンして追加",
       scanHint: "小売バーコードをSpoolBuddyのスキャナーポートの前にかざしてください。",
       waiting: "スキャン待ち…",

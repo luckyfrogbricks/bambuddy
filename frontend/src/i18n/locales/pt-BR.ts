@@ -6557,6 +6557,8 @@ export default {
       noLocation: 'Sem localização',
       newLocation: 'Nova…',
       newLocationPlaceholder: 'Nome da nova localização…',
+      details: 'Detalhes',
+      nozzleTemp: 'Temp. do bico',
       scanTitle: "Escanear código para adicionar",
       scanHint: "Posicione o código de barras em frente à porta do scanner do SpoolBuddy.",
       waiting: "Aguardando leitura…",

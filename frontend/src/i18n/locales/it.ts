@@ -6557,6 +6557,8 @@ export default {
       noLocation: 'Nessuna posizione',
       newLocation: 'Nuova…',
       newLocationPlaceholder: 'Nome della nuova posizione…',
+      details: 'Dettagli',
+      nozzleTemp: 'Temp. ugello',
       scanTitle: "Scansiona codice per aggiungere",
       scanHint: "Tieni il codice a barre davanti alla porta dello scanner di SpoolBuddy.",
       waiting: "In attesa di scansione…",

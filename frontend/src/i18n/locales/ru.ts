@@ -6203,6 +6203,8 @@ export default {
       noLocation: 'Без расположения',
       newLocation: 'Новое…',
       newLocationPlaceholder: 'Название нового расположения…',
+      details: 'Подробности',
+      nozzleTemp: 'Темп. сопла',
       scanTitle: "Сканируйте штрих-код для добавления",
       scanHint: "Поднесите штрих-код с упаковки к окошку сканера на SpoolBuddy.",
       waiting: "Ожидание сканирования…",

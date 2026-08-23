@@ -208,6 +208,65 @@ describe('BarcodeAddModal', () => {
     expect(screen.getAllByText('Refill pack')).toHaveLength(1);
   });
 
+  const mixedCodesRow = {
+    source: 'spoolmandb-community', spool_id: null, material: 'PLA', brand: 'Bambu Lab',
+    subtype: 'PLA Pure', color_name: 'Baby Blue', rgba: '89CFF0FF', label_weight: 1000,
+    nozzle_temp_min: 190, nozzle_temp_max: 230,
+    codes: [
+      { code: '111', kind: 'gtin', is_refill: false },
+      { code: '222', kind: 'gtin', is_refill: true },
+    ],
+  };
+
+  async function openFindAndSearch() {
+    const unmatched = makeScan({
+      matched: false, source: null, material: null, brand: null, subtype: null,
+      color_name: null, rgba: null, label_weight: null,
+    });
+    render(<BarcodeAddModal {...baseProps} scan={unmatched} tagUid="0C1C8364" scaleWeight={1247} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Find This Filament/i }));
+    const input = await screen.findByPlaceholderText(/polymaker charcoal/i);
+    fireEvent.change(input, { target: { value: 'baby blue' } });
+    return screen.findByText('Baby Blue — PLA Pure');
+  }
+
+  it('find flow: select enables Confirm, and Back from confirm keeps all state', async () => {
+    (api.searchBarcodeCatalog as ReturnType<typeof vi.fn>).mockResolvedValue([mixedCodesRow]);
+    const rowTitle = await openFindAndSearch();
+
+    const confirmBtn = screen.getByRole('button', { name: /^Confirm$/i });
+    expect(confirmBtn).toBeDisabled();
+    fireEvent.click(rowTitle);
+    expect(confirmBtn).not.toBeDisabled();
+    fireEvent.click(confirmBtn);
+
+    // Reached via Find → the confirm screen offers Back, not Cancel.
+    expect(await screen.findByText('Confirm New Spool')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Cancel$/i })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /^Back$/i }));
+
+    // Query, results, and selection survive the round-trip.
+    expect(await screen.findByDisplayValue('baby blue')).toBeInTheDocument();
+    expect(screen.getByText('Baby Blue — PLA Pure')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Confirm$/i })).not.toBeDisabled();
+  });
+
+  it('find row Details discloses every code with its own refill flag', async () => {
+    (api.searchBarcodeCatalog as ReturnType<typeof vi.fn>).mockResolvedValue([mixedCodesRow]);
+    await openFindAndSearch();
+
+    // Mixed-code row: no collapsed badge (it is not purely a refill entry) …
+    expect(screen.queryByText('Refill pack')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Details$/i }));
+    // … but the disclosure lists both codes, flagging only the refill one.
+    expect(await screen.findByText('222')).toBeInTheDocument();
+    expect(screen.getByText('111')).toBeInTheDocument();
+    expect(screen.getAllByText('Refill pack')).toHaveLength(1);
+    // Disclosure also selects the row.
+    expect(screen.getByRole('button', { name: /^Confirm$/i })).not.toBeDisabled();
+  });
+
   it('offers "Find This Filament" on the scan-waiting screen (B) and Back returns there', async () => {
     // No scan yet (NFC + weight only, no box/barcode) → the modal sits on screen B.
     render(<BarcodeAddModal {...baseProps} scan={null} tagUid="0C1C8364" scaleWeight={1247} />);

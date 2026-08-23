@@ -6611,6 +6611,8 @@ export default {
       noLocation: 'Без розташування',
       newLocation: 'Нове…',
       newLocationPlaceholder: 'Назва нового розташування…',
+      details: 'Деталі',
+      nozzleTemp: 'Темп. сопла',
       scanTitle: "Скануйте штрих-код, щоб додати",
       scanHint: "Піднесіть роздрібний штрих-код до віконця сканера на SpoolBuddy.",
       waiting: "Очікування сканування…",

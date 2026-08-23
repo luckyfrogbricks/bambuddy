@@ -6558,6 +6558,8 @@ export default {
       noLocation: 'Aucun emplacement',
       newLocation: 'Nouveau…',
       newLocationPlaceholder: 'Nom du nouvel emplacement…',
+      details: 'Détails',
+      nozzleTemp: 'Temp. buse',
       scanTitle: "Scanner un code-barres pour ajouter",
       scanHint: "Placez le code-barres devant le port du scanner de SpoolBuddy.",
       waiting: "En attente de scan…",

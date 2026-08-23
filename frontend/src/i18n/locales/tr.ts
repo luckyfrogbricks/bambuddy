@@ -6512,6 +6512,8 @@ export default {
       noLocation: 'Konum yok',
       newLocation: 'Yeni…',
       newLocationPlaceholder: 'Yeni konum adı…',
+      details: 'Ayrıntılar',
+      nozzleTemp: 'Nozul sıcaklığı',
       scanTitle: "Eklemek için barkod tara",
       scanHint: "Barkodu SpoolBuddy'nin tarayıcı bağlantı noktasının önüne tut.",
       waiting: "Tarama bekleniyor…",

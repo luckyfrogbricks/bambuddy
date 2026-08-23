@@ -91,6 +91,13 @@ export function BarcodeAddModal({
   const [findQuery, setFindQuery] = useState('');
   const [findRows, setFindRows] = useState<CatalogSearchRow[]>([]);
   const [findLoading, setFindLoading] = useState(false);
+  // Find-step selection: rows are selected first (tap row, or tap the
+  // disclosure to select + expand full properties), then Confirm proceeds.
+  const [findSelectedIdx, setFindSelectedIdx] = useState<number | null>(null);
+  const [findExpandedIdx, setFindExpandedIdx] = useState<number | null>(null);
+  // Whether the confirm screen was reached via Find — its left button is then
+  // Back (returns to Find with all state intact) instead of Cancel.
+  const [cameFromFind, setCameFromFind] = useState(false);
   const [busy, setBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [linkedByUser, setLinkedByUser] = useState(false);
@@ -145,6 +152,7 @@ export function BarcodeAddModal({
     setResolved(r);
     setInvalidCode(null);
     setLinkedByUser(false);
+    setCameFromFind(false);
     // Auto-arm the refill toggle when the resolved code is itself a known refill
     // (community DBs flag it); the user can still override on the confirm screen.
     setIsRefill(r.is_refill);
@@ -193,8 +201,17 @@ export function BarcodeAddModal({
     setNewLocOpen(false);
     setNewLocName('');
     setNewLocError(null);
+    setFindSelectedIdx(null);
+    setFindExpandedIdx(null);
+    setCameFromFind(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
+
+  // A new query invalidates the previous selection/expansion.
+  useEffect(() => {
+    setFindSelectedIdx(null);
+    setFindExpandedIdx(null);
+  }, [findQuery]);
 
   // Locations for the picker — fetched per open so a location added elsewhere
   // (web UI, another device) shows up without a kiosk reload.
@@ -326,6 +343,14 @@ export function BarcodeAddModal({
     },
     [resolved],
   );
+
+  const confirmFindSelection = useCallback(() => {
+    if (findSelectedIdx === null) return;
+    const row = displayRows[findSelectedIdx];
+    if (!row) return;
+    selectCatalogRow(row);
+    setCameFromFind(true);
+  }, [findSelectedIdx, displayRows, selectCatalogRow]);
 
   const handleClose = useCallback(() => {
     clearScan();
@@ -747,9 +772,17 @@ export function BarcodeAddModal({
             )}
 
             <div className="flex gap-2">
-              <button type="button" className={btnGhost} onClick={handleClose} disabled={busy}>
-                {t('common.cancel', 'Cancel')}
-              </button>
+              {cameFromFind ? (
+                // Reached via Find This Filament — Back returns there with the
+                // query, results, and selection untouched.
+                <button type="button" className={btnGhost} onClick={() => setStep('find')} disabled={busy}>
+                  {t('common.back', 'Back')}
+                </button>
+              ) : (
+                <button type="button" className={btnGhost} onClick={handleClose} disabled={busy}>
+                  {t('common.cancel', 'Cancel')}
+                </button>
+              )}
               <button type="button" className={btnSecondary} onClick={() => setStep('waiting')} disabled={busy}>
                 {t('spoolbuddy.barcode.rescan', 'Rescan')}
               </button>
@@ -855,41 +888,92 @@ export function BarcodeAddModal({
                 </p>
               )}
               {displayRows.map((row, i) => (
-                <button
+                <div
                   key={`${row.source}-${row.spool_id ?? i}-${i}`}
-                  type="button"
-                  onClick={() => selectCatalogRow(row)}
-                  className="flex items-center gap-3 p-3 rounded-lg bg-zinc-900/60 border border-zinc-700 hover:border-green-500/50 text-left transition-colors"
+                  className={`rounded-lg border transition-colors ${
+                    findSelectedIdx === i
+                      ? 'bg-green-500/10 border-green-500/60'
+                      : 'bg-zinc-900/60 border-zinc-700 hover:border-green-500/50'
+                  }`}
                 >
-                  <span
-                    className="w-6 h-6 rounded-full border-2 border-zinc-600 shrink-0"
-                    style={{ backgroundColor: spoolColorString(row.rgba) }}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5 text-sm font-medium text-zinc-100">
-                      <span className="truncate">
-                        {[row.color_name, row.subtype || row.material].filter(Boolean).join(' — ')}
-                      </span>
-                      {/* A row whose codes are all refill SKUs is the spool-less
-                          variant — otherwise identical twins (with-spool vs
-                          refill catalog entries) are indistinguishable. */}
-                      {row.codes.length > 0 && row.codes.every((c) => c.is_refill) && (
-                        <RefillBadge className="shrink-0" />
-                      )}
+                  <div
+                    className="flex items-center gap-3 p-3 cursor-pointer"
+                    onClick={() => setFindSelectedIdx(i)}
+                  >
+                    <span
+                      className="w-6 h-6 rounded-full border-2 border-zinc-600 shrink-0"
+                      style={{ backgroundColor: spoolColorString(row.rgba) }}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 text-sm font-medium text-zinc-100">
+                        {findSelectedIdx === i && <Check className="w-4 h-4 shrink-0 text-green-500" />}
+                        <span className="truncate">
+                          {[row.color_name, row.subtype || row.material].filter(Boolean).join(' — ')}
+                        </span>
+                        {/* Only a pure-refill row gets the badge — SpoolmanDB
+                            variants usually merge with-spool AND refill codes
+                            into one row, so per-code flags live in Details. */}
+                        {row.codes.length > 0 && row.codes.every((c) => c.is_refill) && (
+                          <RefillBadge className="shrink-0" />
+                        )}
+                      </div>
+                      <div className="text-xs text-zinc-500 truncate">
+                        {[row.brand, row.label_weight ? `${row.label_weight} g` : null].filter(Boolean).join(' • ')}
+                        {row.codes[0] && <span className="font-mono"> • {row.codes[0].code}</span>}
+                      </div>
                     </div>
-                    <div className="text-xs text-zinc-500 truncate">
-                      {[row.brand, row.label_weight ? `${row.label_weight} g` : null].filter(Boolean).join(' • ')}
-                      {/* Primary code disambiguates rows the metadata can't. */}
-                      {row.codes[0] && <span className="font-mono"> • {row.codes[0].code}</span>}
-                    </div>
+                    <SourcePill source={row.source} t={t} />
+                    {/* Disclosure: selects the row and reveals every property,
+                        so visually identical twins become tellable apart. */}
+                    <button
+                      type="button"
+                      aria-label={t('spoolbuddy.barcode.details', 'Details')}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFindSelectedIdx(i);
+                        setFindExpandedIdx((v) => (v === i ? null : i));
+                      }}
+                      className="shrink-0 p-1.5 rounded-full text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700 transition-colors"
+                    >
+                      {findExpandedIdx === i ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                    </button>
                   </div>
-                  <SourcePill source={row.source} t={t} />
-                </button>
+                  {findExpandedIdx === i && (
+                    <div className="px-3 pb-3 pt-1 border-t border-zinc-700/60 text-xs space-y-1.5">
+                      <div className="flex flex-wrap gap-x-5 gap-y-1 text-zinc-400">
+                        <span>{[row.brand, row.material, row.subtype].filter(Boolean).join(' • ')}</span>
+                        {row.label_weight != null && <span>{row.label_weight} g</span>}
+                        {row.nozzle_temp_min != null && row.nozzle_temp_max != null && (
+                          <span>
+                            {t('spoolbuddy.barcode.nozzleTemp', 'Nozzle temp')} {row.nozzle_temp_min}–{row.nozzle_temp_max} °C
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        {row.codes.map((c) => (
+                          <span key={c.code} className="flex items-center gap-2 text-zinc-300">
+                            <span className="font-mono">{c.code}</span>
+                            <span className="uppercase text-[10px] text-zinc-500">{c.kind}</span>
+                            {c.is_refill && <RefillBadge />}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               ))}
             </div>
             <div className="flex gap-2">
               <button type="button" className={btnGhost} onClick={() => setStep(findBackStep)}>
                 {t('common.back', 'Back')}
+              </button>
+              <button
+                type="button"
+                className={btnPrimary}
+                disabled={findSelectedIdx === null}
+                onClick={confirmFindSelection}
+              >
+                {t('common.confirm', 'Confirm')}
               </button>
             </div>
           </>

@@ -6556,6 +6556,8 @@ export default {
       noLocation: '無位置',
       newLocation: '新建…',
       newLocationPlaceholder: '新位置名稱…',
+      details: '詳情',
+      nozzleTemp: '噴嘴溫度',
       scanTitle: "掃描條碼以新增",
       scanHint: "將零售條碼對準 SpoolBuddy 的掃描孔。",
       waiting: "等待掃描…",
