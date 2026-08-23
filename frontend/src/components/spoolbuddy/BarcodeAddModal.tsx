@@ -177,19 +177,33 @@ export function BarcodeAddModal({
     void wasManual;
   }, []);
 
-  // React to a fresh scan arriving (auto-open path, Rescan, or a scan landing
-  // while the modal is already open — replace-latest).
+  // React to a fresh scan arriving. Scans apply ONLY on the scan-waiting
+  // screen: once a scan has produced a screen (confirm / no-match / Find /
+  // manual), further scans are consumed and dropped — a presentation-mode
+  // scanner re-fires on the same box past the daemon's debounce and would
+  // clobber in-progress edits or a Find selection. The gate is derived
+  // purely from `step`, so it can never stick: both Rescan buttons and the
+  // invalid-scan path return to 'waiting' (re-armed), and closing the modal
+  // resets `step` below. Gated scans are still marked handled so Rescan
+  // waits for a genuinely new scan instead of replaying the dropped one.
   useEffect(() => {
     if (!isOpen || !scan) return;
     if (handledReceiptRef.current === scan.receivedAt) return;
     handledReceiptRef.current = scan.receivedAt;
+    if (step !== 'waiting') return;
     if (!scan.valid) {
       setInvalidCode(scan.barcode);
       setStep('waiting');
       return;
     }
     applyResolved(fromScan(scan), scan.matched, false);
-  }, [isOpen, scan, applyResolved]);
+  }, [isOpen, scan, step, applyResolved]);
+
+  // Closing the modal (any path — Cancel, create, auto-close, parent) always
+  // re-arms the scan gate, so the next open can never start scan-deaf.
+  useEffect(() => {
+    if (!isOpen) setStep('waiting');
+  }, [isOpen]);
 
   // Reset to a clean slate each time the modal opens without a scan in hand.
   useEffect(() => {

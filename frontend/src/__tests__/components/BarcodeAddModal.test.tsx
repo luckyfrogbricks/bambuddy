@@ -97,6 +97,59 @@ describe('BarcodeAddModal', () => {
     expect(screen.getByRole('button', { name: /Find This Filament/i })).toBeInTheDocument();
   });
 
+  it('ignores further scans while a resolved screen is showing (presentation-mode re-fires)', async () => {
+    const { rerender } = render(
+      <BarcodeAddModal {...baseProps} scan={makeScan({ receivedAt: 1000 })} tagUid="0C1C8364" scaleWeight={1247} />,
+    );
+    expect(await screen.findByText('Charcoal Black')).toBeInTheDocument();
+
+    // A second scan lands while the confirm screen is up — it must NOT
+    // replace the resolved state.
+    rerender(
+      <BarcodeAddModal
+        {...baseProps}
+        scan={makeScan({ receivedAt: 2000, barcode: '9999999999990', color_name: 'Lava Red' })}
+        tagUid="0C1C8364"
+        scaleWeight={1247}
+      />,
+    );
+    expect(screen.getByText('Charcoal Black')).toBeInTheDocument();
+    expect(screen.queryByText('Lava Red')).not.toBeInTheDocument();
+  });
+
+  it('Rescan re-arms the gate: the next NEW scan applies (the dropped one does not replay)', async () => {
+    const { rerender } = render(
+      <BarcodeAddModal {...baseProps} scan={makeScan({ receivedAt: 1000 })} tagUid="0C1C8364" scaleWeight={1247} />,
+    );
+    expect(await screen.findByText('Charcoal Black')).toBeInTheDocument();
+
+    // Gated scan (consumed and dropped).
+    rerender(
+      <BarcodeAddModal
+        {...baseProps}
+        scan={makeScan({ receivedAt: 2000, barcode: '9999999999990', color_name: 'Lava Red' })}
+        tagUid="0C1C8364"
+        scaleWeight={1247}
+      />,
+    );
+
+    // Rescan returns to the waiting screen — the dropped scan must not replay.
+    fireEvent.click(screen.getByRole('button', { name: /^Rescan$/i }));
+    expect(await screen.findByText(/Scan Barcode to Add/i)).toBeInTheDocument();
+    expect(screen.queryByText('Lava Red')).not.toBeInTheDocument();
+
+    // A genuinely new scan applies again.
+    rerender(
+      <BarcodeAddModal
+        {...baseProps}
+        scan={makeScan({ receivedAt: 3000, barcode: '8888888888880', color_name: 'Jade Green' })}
+        tagUid="0C1C8364"
+        scaleWeight={1247}
+      />,
+    );
+    expect(await screen.findByText('Jade Green')).toBeInTheDocument();
+  });
+
   it('creates a spool with the scanned barcode in the payload (local mode)', async () => {
     render(
       <BarcodeAddModal {...baseProps} scan={makeScan()} tagUid="0C1C8364" scaleWeight={1247} />,
