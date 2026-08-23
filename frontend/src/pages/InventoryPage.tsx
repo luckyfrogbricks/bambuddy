@@ -91,6 +91,7 @@ const DEFAULT_COLUMNS: ColumnConfig[] = [
   { id: 'pa_k', label: 'PA(K)', visible: true },
   { id: 'tag_id', label: 'Tag ID', visible: false },
   { id: 'barcode', label: 'Barcode', visible: false },
+  { id: 'sku_code', label: 'SKU', visible: false },
   { id: 'data_origin', label: 'Data Origin', visible: false },
   { id: 'tag_type', label: 'Linked Tag Type', visible: false },
   { id: 'stock', label: 'Stock', visible: false },
@@ -201,6 +202,7 @@ const columnHeaders: Record<string, (t: TFn) => string> = {
   pa_k: () => 'PA(K)',
   tag_id: () => 'Tag ID',
   barcode: (t) => t('inventory.barcode', { defaultValue: 'Barcode' }),
+  sku_code: (t) => t('inventory.skuCode', { defaultValue: 'SKU' }),
   data_origin: () => 'Data Origin',
   tag_type: () => 'Linked Tag Type',
   stock: (t) => t('inventory.stock'),
@@ -319,13 +321,22 @@ const columnCells: Record<string, (ctx: CellCtx) => ReactNode> = {
     );
   },
   barcode: ({ spool }) => {
-    // One column shows every stored code so the table stays compact; the
-    // typed breakdown lives in the edit form.
-    const codes = [spool.gtin_code, spool.sku_code, spool.asin_code, spool.other_code].filter(Boolean);
-    if (codes.length === 0) return <span className="text-sm text-bambu-gray/50">-</span>;
+    // The roll's retail identity: the GTIN, or the ASIN when no GTIN exists
+    // (Amazon-native brands) — never both. SKU has its own column; a
+    // user-owned other_code shows only in the edit form.
+    const code = spool.gtin_code || spool.asin_code;
+    if (!code) return <span className="text-sm text-bambu-gray/50">-</span>;
     return (
-      <span className="text-sm text-bambu-gray font-mono" title={codes.join(' \u2022 ')}>
-        {codes.join(' \u2022 ')}
+      <span className="text-sm text-bambu-gray font-mono" title={code}>
+        {code}
+      </span>
+    );
+  },
+  sku_code: ({ spool }) => {
+    if (!spool.sku_code) return <span className="text-sm text-bambu-gray/50">-</span>;
+    return (
+      <span className="text-sm text-bambu-gray font-mono" title={spool.sku_code}>
+        {spool.sku_code}
       </span>
     );
   },
@@ -450,7 +461,8 @@ const columnSortValues: Record<string, (spool: InventorySpool, assignmentMap: Re
   used: (s) => s.weight_used,
   remaining: (s) => s.label_weight > 0 ? Math.max(0, s.label_weight - s.weight_used) / s.label_weight : 0,
   note: (s) => (s.note || '').toLowerCase(),
-  barcode: (s) => s.gtin_code || s.sku_code || s.asin_code || s.other_code || '',
+  barcode: (s) => s.gtin_code || s.asin_code || '',
+  sku_code: (s) => s.sku_code || '',
   data_origin: (s) => (s.data_origin || '').toLowerCase(),
   tag_type: (s) => (s.tag_type || '').toLowerCase(),
   stock: (s) => s.slicer_filament ? 1 : 0,
