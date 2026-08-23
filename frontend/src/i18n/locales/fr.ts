@@ -6653,8 +6653,6 @@ export default {
       grossWeight: 'Poids brut',
       spoolSize: 'Taille bobine',
       close: 'Fermer',
-      closingIn: 'Fermeture dans {{seconds}}…',
-      cancelAutoClose: 'Annuler la fermeture automatique',
       currentSpool: 'Bobine actuelle',
       plateReady: 'Plateau prêt : {{name}}',
       plateReadyLabel: 'Plateaux à libérer',

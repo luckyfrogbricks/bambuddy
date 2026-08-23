@@ -6713,8 +6713,6 @@ export default {
       grossWeight: 'Gross weight',
       spoolSize: 'Spool size',
       close: 'Close',
-      closingIn: 'Closing in {{seconds}}…',
-      cancelAutoClose: 'Cancel auto-close',
       currentSpool: 'Current Spool',
       plateReady: 'Plate ready: {{name}}',
       plateReadyLabel: 'Plates ready to clear',

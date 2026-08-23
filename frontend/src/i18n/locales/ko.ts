@@ -6310,8 +6310,6 @@ export default {
       grossWeight: '총 무게',
       spoolSize: '스풀 크기',
       close: '닫기',
-      closingIn: '{{seconds}}초 후 닫힘…',
-      cancelAutoClose: '자동 닫기 취소',
       currentSpool: '현재 스풀',
       plateReady: '플레이트 준비됨: {{name}}',
       plateReadyLabel: '초기화할 플레이트',

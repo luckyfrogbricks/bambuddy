@@ -6663,8 +6663,6 @@ export default {
       grossWeight: 'Bruttogewicht',
       spoolSize: 'Spulengröße',
       close: 'Schließen',
-      closingIn: 'Schließt in {{seconds}}…',
-      cancelAutoClose: 'Automatisches Schließen abbrechen',
       currentSpool: 'Aktuelle Spule',
       plateReady: 'Druckplatte bereit: {{name}}',
       plateReadyLabel: 'Bereit-zum-Quittieren-Liste',

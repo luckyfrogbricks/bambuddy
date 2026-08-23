@@ -6652,8 +6652,6 @@ export default {
       grossWeight: 'Peso bruto',
       spoolSize: 'Tamanho do carretel',
       close: 'Fechar',
-      closingIn: 'Fechando em {{seconds}}…',
-      cancelAutoClose: 'Cancelar fechamento automático',
       currentSpool: 'Carretel Atual',
       plateReady: 'Mesa pronta: {{name}}',
       plateReadyLabel: 'Mesas para liberar',

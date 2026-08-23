@@ -6652,8 +6652,6 @@ export default {
       grossWeight: 'Peso lordo',
       spoolSize: 'Dimensione bobina',
       close: 'Chiudi',
-      closingIn: 'Chiusura tra {{seconds}}…',
-      cancelAutoClose: 'Annulla chiusura automatica',
       currentSpool: 'Bobina attuale',
       plateReady: 'Piatto pronto: {{name}}',
       plateReadyLabel: 'Piatti da liberare',

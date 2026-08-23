@@ -6664,8 +6664,6 @@ export default {
       grossWeight: '総重量',
       spoolSize: 'スプールサイズ',
       close: '閉じる',
-      closingIn: 'あと{{seconds}}秒で閉じます…',
-      cancelAutoClose: '自動クローズをキャンセル',
       currentSpool: '現在のスプール',
       plateReady: 'プレート準備完了: {{name}}',
       plateReadyLabel: '片付け待ちプレート',
