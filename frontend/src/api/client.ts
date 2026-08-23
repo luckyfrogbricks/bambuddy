@@ -3496,6 +3496,35 @@ export interface CatalogSearchRow {
   codes: LinkedCode[];
 }
 
+// ── SpoolBuddy tap-first catalog browser (brand → material → line → color) ──
+export type BrowseHue = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'pink' | 'neutral';
+
+export interface CatalogBrowseBrand {
+  name: string;
+  variant_count: number;
+  /** The brand appears in the user's own inventory — ranked first. */
+  owned: boolean;
+}
+
+/** A material-family or product-line tile: name + size + swatch preview. */
+export interface CatalogBrowseGroup {
+  name: string;
+  variant_count: number;
+  preview_rgbas: string[];
+}
+
+export interface CatalogBrowseResponse {
+  /** False when community catalog lookups are disabled in settings. */
+  enabled: boolean;
+  level: 'brands' | 'materials' | 'lines' | 'colors';
+  brands: CatalogBrowseBrand[];
+  groups: CatalogBrowseGroup[];
+  /** Leaf rows — same shape the Find picker consumes. */
+  colors: CatalogSearchRow[];
+  /** Total matches before the cap, when `colors` was truncated. */
+  total: number | null;
+}
+
 export interface SpoolmanBulkCreateResult {
   created: InventorySpool[];
   requested_count: number;
@@ -6195,6 +6224,16 @@ export const api = {
     request<CatalogSearchRow[]>(
       `/inventory/barcode/catalog-search?q=${encodeURIComponent(q)}&limit=${limit}`,
     ),
+  // SpoolBuddy "Browse Catalog": one level of the tap-first browse tree.
+  browseBarcodeCatalog: (params: { brand?: string; material?: string; line?: string; hue?: BrowseHue }) => {
+    const qs = new URLSearchParams();
+    if (params.brand) qs.set('brand', params.brand);
+    if (params.material) qs.set('material', params.material);
+    if (params.line) qs.set('line', params.line);
+    if (params.hue) qs.set('hue', params.hue);
+    const suffix = qs.toString();
+    return request<CatalogBrowseResponse>(`/inventory/barcode/catalog-browse${suffix ? `?${suffix}` : ''}`);
+  },
   // ── CSV import/export (#1576) ────────────────────────────────────────────
   // dry_run=true → preview (no write); omitted → real import. Both share one
   // multipart upload helper; see `uploadSpoolsCsv` below.

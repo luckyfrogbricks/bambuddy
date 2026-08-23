@@ -22,6 +22,9 @@ vi.mock('../../api/client', () => ({
     linkTagToSpoolmanSpool: vi.fn().mockResolvedValue({ id: 1 }),
     lookupFilamentBarcode: vi.fn(),
     searchBarcodeCatalog: vi.fn().mockResolvedValue([]),
+    browseBarcodeCatalog: vi.fn().mockResolvedValue({
+      enabled: true, level: 'brands', brands: [], groups: [], colors: [], total: null,
+    }),
     getLocations: vi.fn().mockResolvedValue([]),
     createLocation: vi.fn(),
   },
@@ -392,6 +395,134 @@ describe('BarcodeAddModal', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Add to Inventory$/i }));
     await waitFor(() => expect(api.createSpool).toHaveBeenCalledTimes(1));
     expect((api.createSpool as ReturnType<typeof vi.fn>).mock.calls[0][0].location_id).toBeNull();
+  });
+
+  // ── Browse Catalog (screen G): tap-first brand → material → line → color ──
+
+  const pumpkinRow = {
+    source: 'spoolmandb-community', spool_id: null, material: 'PLA', brand: 'Bambu Lab',
+    subtype: 'PLA Basic', color_name: 'Pumpkin Orange', rgba: 'FF9016FF', label_weight: 1000,
+    nozzle_temp_min: 190, nozzle_temp_max: 230,
+    codes: [{ code: '10301', kind: 'sku', is_refill: false }],
+  };
+
+  function mockBrowseTree() {
+    (api.browseBarcodeCatalog as ReturnType<typeof vi.fn>).mockImplementation(
+      (params: { brand?: string; material?: string; line?: string; hue?: string }) => {
+        const empty = { enabled: true, brands: [], groups: [], colors: [], total: null };
+        if (params.hue) {
+          return Promise.resolve({
+            ...empty, level: 'colors', colors: [pumpkinRow], total: 88,
+          });
+        }
+        if (params.line) {
+          return Promise.resolve({ ...empty, level: 'colors', colors: [pumpkinRow], total: 1 });
+        }
+        if (params.material) {
+          return Promise.resolve({
+            ...empty, level: 'lines',
+            groups: [{ name: 'PLA Basic', variant_count: 48, preview_rgbas: ['FF9016FF'] }],
+          });
+        }
+        if (params.brand) {
+          return Promise.resolve({
+            ...empty, level: 'materials',
+            groups: [{ name: 'PLA', variant_count: 212, preview_rgbas: ['FF9016FF'] }],
+          });
+        }
+        return Promise.resolve({
+          ...empty, level: 'brands',
+          brands: [
+            { name: 'Bambu Lab', variant_count: 373, owned: true },
+            { name: 'Sunlu', variant_count: 540, owned: false },
+          ],
+        });
+      },
+    );
+  }
+
+  it('browse: drills brand → material → line → color and creates with the picked codes', async () => {
+    mockBrowseTree();
+    render(<BarcodeAddModal {...baseProps} scan={null} tagUid="0C1C8364" scaleWeight={1247} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Browse Catalog/i }));
+    // Brands level: owned brands surface in their own "Your brands" section.
+    expect(await screen.findByText('Your brands')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Bambu Lab/ }));
+    // Materials → lines → colors.
+    fireEvent.click(await screen.findByRole('button', { name: /PLA 212 colors/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /PLA Basic 48 colors/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Pumpkin Orange/ }));
+
+    // Confirm screen: a pure browse pick has no barcode to link.
+    expect(await screen.findByText('Confirm New Spool')).toBeInTheDocument();
+    expect(screen.getAllByText(/Picked from the catalog/i).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Add to Inventory$/i }));
+    await waitFor(() => expect(api.createSpool).toHaveBeenCalledTimes(1));
+    const payload = (api.createSpool as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(payload.scanned_code).toBeNull();
+    expect(payload.brand).toBe('Bambu Lab');
+    expect(payload.color_name).toBe('Pumpkin Orange');
+    // The picked row's per-package codes are stored explicitly, like a Find pick.
+    expect(payload.sku_code).toBe('10301');
+    expect(payload.tag_uid).toBe('0C1C8364');
+  });
+
+  it('browse: the hue filter works at the top level and shows the truncation note', async () => {
+    mockBrowseTree();
+    render(<BarcodeAddModal {...baseProps} scan={null} tagUid={null} scaleWeight={null} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Browse Catalog/i }));
+    await screen.findByText('Your brands');
+    fireEvent.click(screen.getByRole('button', { name: /^Orange$/ }));
+
+    // Hue results render as context rows (brand • line) with the capped total.
+    expect(await screen.findByText('Pumpkin Orange')).toBeInTheDocument();
+    expect(screen.getByText(/Bambu Lab • PLA Basic/)).toBeInTheDocument();
+    expect(screen.getByText(/Showing 1 of 88/)).toBeInTheDocument();
+  });
+
+  it('browse: Back from confirm returns to the same browse screen', async () => {
+    mockBrowseTree();
+    render(<BarcodeAddModal {...baseProps} scan={null} tagUid="0C1C8364" scaleWeight={1247} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Browse Catalog/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Bambu Lab/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /PLA 212 colors/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /PLA Basic 48 colors/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Pumpkin Orange/ }));
+
+    expect(await screen.findByText('Confirm New Spool')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Back$/i }));
+    // The color grid is restored — nav state survived the round-trip.
+    expect(await screen.findByRole('button', { name: /Pumpkin Orange/ })).toBeInTheDocument();
+    expect(screen.getByText('PLA Basic')).toBeInTheDocument();
+  });
+
+  it('browse: a hardware scan mid-browse wins and resolves normally', async () => {
+    mockBrowseTree();
+    const { rerender } = render(
+      <BarcodeAddModal {...baseProps} scan={null} tagUid="0C1C8364" scaleWeight={1247} />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /Browse Catalog/i }));
+    await screen.findByText('Your brands');
+
+    // The box lands in front of the scanner while the user is browsing.
+    rerender(
+      <BarcodeAddModal {...baseProps} scan={makeScan({ receivedAt: 5000 })} tagUid="0C1C8364" scaleWeight={1247} />,
+    );
+    expect(await screen.findByText('Charcoal Black')).toBeInTheDocument();
+    expect(screen.getByText(/Matched in Open Filament Database/i)).toBeInTheDocument();
+  });
+
+  it('browse: explains when community lookups are disabled', async () => {
+    (api.browseBarcodeCatalog as ReturnType<typeof vi.fn>).mockResolvedValue({
+      enabled: false, level: 'brands', brands: [], groups: [], colors: [], total: null,
+    });
+    render(<BarcodeAddModal {...baseProps} scan={null} tagUid={null} scaleWeight={null} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Browse Catalog/i }));
+    expect(await screen.findByText(/Community catalog lookups are turned off/i)).toBeInTheDocument();
   });
 
   it('shows the backend error and stays open when the create is rejected', async () => {

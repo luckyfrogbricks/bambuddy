@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Barcode, Check, ChevronDown, ChevronUp, Loader2, MapPin, Plus, Search, AlertTriangle } from 'lucide-react';
+import { Barcode, Check, ChevronDown, ChevronUp, LayoutGrid, Loader2, MapPin, Plus, Search, AlertTriangle } from 'lucide-react';
 import { api, type InventorySpool, type CatalogSearchRow } from '../../api/client';
 import type { ScannedBarcode, LinkedCode } from '../../hooks/useSpoolBuddyState';
 import { spoolColorString } from '../../utils/colors';
 import { RefillBadge } from '../RefillBadge';
 import { SpoolIcon } from './SpoolIcon';
 import { KioskToggle } from './KioskToggle';
+import { CatalogBrowsePanel, type BrowseNav } from './CatalogBrowsePanel';
 import { getDefaultCoreWeight } from './coreWeight';
 
 // NOTE: this is the SpoolBuddy (kiosk) add-to-inventory flow, driven entirely
@@ -14,7 +15,7 @@ import { getDefaultCoreWeight } from './coreWeight';
 // app's camera/OCR BarcodeScannerModal — the kiosk has no camera and runs over
 // plain HTTP where getUserMedia is unavailable.
 
-type Step = 'waiting' | 'manual' | 'looking_up' | 'confirm' | 'no_match' | 'find';
+type Step = 'waiting' | 'manual' | 'looking_up' | 'confirm' | 'no_match' | 'find' | 'browse';
 
 // Modern Amazon ASIN shape — mirrors the backend classifier's heuristic.
 const ASIN_RE = /^B0[A-Z0-9]{8}$/;
@@ -104,6 +105,12 @@ export function BarcodeAddModal({
   // Whether the confirm screen was reached via Find — its left button is then
   // Back (returns to Find with all state intact) instead of Cancel.
   const [cameFromFind, setCameFromFind] = useState(false);
+  // Same for the tap-first catalog browser. Its navigation state lives here
+  // (not in the panel) so Back-from-confirm restores the exact browse screen.
+  const [cameFromBrowse, setCameFromBrowse] = useState(false);
+  const [browseNav, setBrowseNav] = useState<BrowseNav>({});
+  // Where Browse was opened from, so its root-level Back returns there.
+  const [browseBackStep, setBrowseBackStep] = useState<Step>('waiting');
   const [busy, setBusy] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [linkedByUser, setLinkedByUser] = useState(false);
@@ -162,6 +169,7 @@ export function BarcodeAddModal({
     setInvalidCode(null);
     setLinkedByUser(false);
     setCameFromFind(false);
+    setCameFromBrowse(false);
     setPickedCodes(null);
     // Auto-arm the refill toggle when the resolved code is itself a known refill
     // (community DBs flag it); the user can still override on the confirm screen.
@@ -178,22 +186,26 @@ export function BarcodeAddModal({
   }, []);
 
   // React to a fresh scan arriving. Scans apply ONLY on the scan-waiting
-  // screen: once a scan has produced a screen (confirm / no-match / Find /
-  // manual), further scans are consumed and dropped — a presentation-mode
-  // scanner re-fires on the same box past the daemon's debounce and would
-  // clobber in-progress edits or a Find selection. The gate is derived
-  // purely from `step`, so it can never stick: both Rescan buttons and the
-  // invalid-scan path return to 'waiting' (re-armed), and closing the modal
-  // resets `step` below. Gated scans are still marked handled so Rescan
-  // waits for a genuinely new scan instead of replaying the dropped one.
+  // screen and while browsing the catalog: once a scan has produced a screen
+  // (confirm / no-match / Find / manual), further scans are consumed and
+  // dropped — a presentation-mode scanner re-fires on the same box past the
+  // daemon's debounce and would clobber in-progress edits or a Find
+  // selection. Mid-browse a scan wins (browse screens are navigation, not a
+  // resolved result — scanning the box is always the faster path). The gate
+  // is derived purely from `step`, so it can never stick: both Rescan
+  // buttons and the invalid-scan path return to 'waiting' (re-armed), and
+  // closing the modal resets `step` below. Gated scans are still marked
+  // handled so Rescan waits for a genuinely new scan instead of replaying
+  // the dropped one.
   useEffect(() => {
     if (!isOpen || !scan) return;
     if (handledReceiptRef.current === scan.receivedAt) return;
     handledReceiptRef.current = scan.receivedAt;
-    if (step !== 'waiting') return;
+    if (step !== 'waiting' && step !== 'browse') return;
     if (!scan.valid) {
-      setInvalidCode(scan.barcode);
-      setStep('waiting');
+      // The unreadable-scan banner lives on the waiting screen; mid-browse an
+      // invalid scan is dropped silently rather than yanking the user out.
+      if (step === 'waiting') setInvalidCode(scan.barcode);
       return;
     }
     applyResolved(fromScan(scan), scan.matched, false);
@@ -228,6 +240,8 @@ export function BarcodeAddModal({
     setFindSelectedIdx(null);
     setFindExpandedIdx(null);
     setCameFromFind(false);
+    setCameFromBrowse(false);
+    setBrowseNav({});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
@@ -381,7 +395,17 @@ export function BarcodeAddModal({
     if (!row) return;
     selectCatalogRow(row);
     setCameFromFind(true);
+    setCameFromBrowse(false);
   }, [findSelectedIdx, displayRows, selectCatalogRow]);
+
+  const pickFromBrowse = useCallback(
+    (row: CatalogSearchRow) => {
+      selectCatalogRow(row);
+      setCameFromFind(false);
+      setCameFromBrowse(true);
+    },
+    [selectCatalogRow],
+  );
 
   const handleClose = useCallback(() => {
     clearScan();
@@ -501,7 +525,13 @@ export function BarcodeAddModal({
   );
 
   const sourceLabel = useMemo(() => {
-    if (linkedByUser) return t('spoolbuddy.barcode.sourceLinked', 'Linked by you — barcode saved for next time');
+    if (linkedByUser) {
+      // With a scanned/entered code in hand the pick links that code; a pure
+      // catalog browse has no code to link — it's just a pick.
+      return resolved?.barcode
+        ? t('spoolbuddy.barcode.sourceLinked', 'Linked by you — barcode saved for next time')
+        : t('spoolbuddy.barcode.sourcePicked', 'Picked from the catalog');
+    }
     switch (resolved?.source) {
       case 'inventory':
         return t('spoolbuddy.barcode.sourceInventory', 'Matched in your inventory');
@@ -544,9 +574,13 @@ export function BarcodeAddModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="bg-zinc-800 rounded-2xl p-6 w-full max-w-lg border border-zinc-700">
-        {/* --- Chips: tag + scale (shared header for scan/confirm) --- */}
-        {(step === 'waiting' || step === 'confirm' || step === 'looking_up') && (
+      <div
+        className={`bg-zinc-800 rounded-2xl p-6 w-full border border-zinc-700 ${
+          step === 'browse' ? 'max-w-3xl' : 'max-w-lg'
+        }`}
+      >
+        {/* --- Chips: tag + scale (shared header for scan/browse/confirm) --- */}
+        {(step === 'waiting' || step === 'confirm' || step === 'looking_up' || step === 'browse') && (
           <div className="flex flex-wrap gap-2 mb-4">
             <Chip
               ok={!!tagUid}
@@ -585,12 +619,17 @@ export function BarcodeAddModal({
                 </p>
               </div>
             </div>
-            <div className="flex gap-2">
-              <button type="button" className={btnGhost} onClick={handleClose}>
-                {t('common.cancel', 'Cancel')}
-              </button>
-              <button type="button" className={btnSecondary} onClick={() => setStep('manual')}>
-                {t('spoolbuddy.barcode.enterManually', 'Enter Code Manually')}
+            <div className="flex gap-2 mb-2.5">
+              <button
+                type="button"
+                className={btnSecondary}
+                onClick={() => {
+                  setBrowseNav({});
+                  setBrowseBackStep('waiting');
+                  setStep('browse');
+                }}
+              >
+                <LayoutGrid className="w-4 h-4" /> {t('spoolbuddy.barcode.browseCatalog', 'Browse Catalog')}
               </button>
               <button
                 type="button"
@@ -603,6 +642,14 @@ export function BarcodeAddModal({
                 }}
               >
                 <Search className="w-4 h-4" /> {t('spoolbuddy.barcode.findFilament', 'Find This Filament…')}
+              </button>
+            </div>
+            <div className="flex gap-2">
+              <button type="button" className={btnGhost} onClick={handleClose}>
+                {t('common.cancel', 'Cancel')}
+              </button>
+              <button type="button" className={btnSecondary} onClick={() => setStep('manual')}>
+                {t('spoolbuddy.barcode.enterManually', 'Enter Code Manually')}
               </button>
               <button
                 type="button"
@@ -668,9 +715,13 @@ export function BarcodeAddModal({
                 ? t('spoolbuddy.barcode.confirmTitle', 'Confirm New Spool')
                 : t('spoolbuddy.barcode.barcodeScannedTitle', 'Barcode Scanned')}
             </h3>
-            <p className="text-sm text-zinc-400 mb-4">
-              {t('spoolbuddy.barcode.scannedCode', 'Scanned')} <span className="font-mono">{resolved.barcode}</span>
-            </p>
+            {resolved.barcode ? (
+              <p className="text-sm text-zinc-400 mb-4">
+                {t('spoolbuddy.barcode.scannedCode', 'Scanned')} <span className="font-mono">{resolved.barcode}</span>
+              </p>
+            ) : (
+              <p className="text-sm text-zinc-400 mb-4">{sourceLabel}</p>
+            )}
 
             <div className="flex gap-4 p-4 mb-4 rounded-xl bg-zinc-900/60 border border-green-500/30">
               <div className="shrink-0">
@@ -696,7 +747,7 @@ export function BarcodeAddModal({
               <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 p-4 mb-5 rounded-lg bg-zinc-900/60 text-sm">
                 <Row k={t('spoolbuddy.barcode.rowTag', 'Tag')} v={tagUid ?? '—'} />
                 <Row k={t('spoolbuddy.barcode.rowGross', 'Gross weight')} v={grossWeight !== null ? `${grossWeight} g` : '—'} />
-                <Row k={t('spoolbuddy.barcode.rowBarcode', 'Barcode')} v={resolved.barcode} />
+                <Row k={t('spoolbuddy.barcode.rowBarcode', 'Barcode')} v={resolved.barcode || '—'} />
                 <Row k={t('spoolbuddy.barcode.rowEst', 'Est. filament')} v={estFilament !== null ? `${estFilament} g` : '—'} />
               </div>
             )}
@@ -814,10 +865,15 @@ export function BarcodeAddModal({
             )}
 
             <div className="flex gap-2">
-              {cameFromFind ? (
-                // Reached via Find This Filament — Back returns there with the
-                // query, results, and selection untouched.
-                <button type="button" className={btnGhost} onClick={() => setStep('find')} disabled={busy}>
+              {cameFromFind || cameFromBrowse ? (
+                // Reached via Find or Browse — Back returns there with the
+                // query/results/selection (or browse position) untouched.
+                <button
+                  type="button"
+                  className={btnGhost}
+                  onClick={() => setStep(cameFromFind ? 'find' : 'browse')}
+                  disabled={busy}
+                >
                   {t('common.back', 'Back')}
                 </button>
               ) : (
@@ -888,6 +944,17 @@ export function BarcodeAddModal({
               </button>
               <button
                 type="button"
+                className={btnSecondary}
+                onClick={() => {
+                  setBrowseNav({});
+                  setBrowseBackStep('no_match');
+                  setStep('browse');
+                }}
+              >
+                <LayoutGrid className="w-4 h-4" /> {t('spoolbuddy.barcode.browseCatalog', 'Browse Catalog')}
+              </button>
+              <button
+                type="button"
                 className={btnPrimary}
                 onClick={() => {
                   setFindBackStep('no_match');
@@ -900,6 +967,16 @@ export function BarcodeAddModal({
               </button>
             </div>
           </>
+        )}
+
+        {/* --- Screen G: browse catalog (tap-first, no keyboard) --- */}
+        {step === 'browse' && (
+          <CatalogBrowsePanel
+            nav={browseNav}
+            onNavChange={setBrowseNav}
+            onPick={pickFromBrowse}
+            onExit={() => setStep(browseBackStep)}
+          />
         )}
 
         {/* --- Screen F: find this filament --- */}
