@@ -49,6 +49,7 @@ from backend.app.services.barcode_resolver import (
     resolve_barcode,
     route_scanned_code,
 )
+from backend.app.services.catalog_browse import HUE_FAMILIES, CatalogBrowseResponse, browse_catalog, owned_brands
 from backend.app.services.catalog_search import CatalogSearchRow, search_catalog
 from backend.app.services.location_service import (
     DUPLICATE_LOCATION_NAME,
@@ -1405,6 +1406,36 @@ async def barcode_catalog_search(
     settings = await _load_settings_map(db)
     client = await _ensure_spoolman_client(settings)
     return await search_catalog(db, q, limit, settings, client)
+
+
+@router.get("/barcode/catalog-browse", response_model=CatalogBrowseResponse)
+async def barcode_catalog_browse(
+    brand: str | None = Query(None, max_length=100),
+    material: str | None = Query(None, max_length=50),
+    line: str | None = Query(None, max_length=100),
+    hue: str | None = Query(None, max_length=20),
+    limit: int = Query(120, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    _: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_READ),
+):
+    """One level of the SpoolBuddy tap-first catalog browser (brand →
+    material → line → color, with an any-depth hue filter) — see
+    services/catalog_browse.py for the tree itself.
+
+    Gated on the same ``barcode_lookup_enabled`` setting as catalog-search:
+    the browse data is the SpoolmanDB-Community cache, and serving it while
+    lookups are disabled could trigger that client's TTL refresh download.
+    Declared before ``GET /barcode/{barcode}`` so the literal path wins
+    routing over the parameterised one.
+    """
+    if hue is not None and hue not in HUE_FAMILIES:
+        raise HTTPException(status_code=422, detail=f"hue must be one of {', '.join(HUE_FAMILIES)}")
+    settings = await _load_settings_map(db)
+    if not barcode_lookup_enabled(settings):
+        return CatalogBrowseResponse(enabled=False, level="brands")
+    client = await _ensure_spoolman_client(settings)
+    owned = await owned_brands(db, client)
+    return await browse_catalog(brand, material, line, hue, limit, owned)
 
 
 @router.get("/barcode/{barcode}", response_model=BarcodeLookupResponse)
