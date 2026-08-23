@@ -3497,7 +3497,18 @@ export interface CatalogSearchRow {
 }
 
 // ── SpoolBuddy tap-first catalog browser (brand → material → line → color) ──
-export type BrowseHue = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'pink' | 'neutral';
+export type BrowseHue =
+  | 'red'
+  | 'orange'
+  | 'yellow'
+  | 'green'
+  | 'blue'
+  | 'purple'
+  | 'pink'
+  | 'brown'
+  | 'black'
+  | 'gray'
+  | 'white';
 
 export interface CatalogBrowseBrand {
   name: string;

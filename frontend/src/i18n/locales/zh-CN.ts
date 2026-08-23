@@ -6630,7 +6630,10 @@ export default {
       hueBlue: '蓝',
       huePurple: '紫',
       huePink: '粉',
-      hueNeutral: '黑 / 白 / 灰',
+      hueBrown: '棕',
+      hueBlack: '黑',
+      hueGray: '灰',
+      hueWhite: '白',
     },
     nav: {
       dashboard: '仪表板',

@@ -22,10 +22,12 @@ Normalization applied on top of the raw variants (upstream files are messy):
   ways). Colors are de-duplicated by name within the merged line, preferring
   the variant that carries barcodes/SKUs.
 - **Hue buckets**: every color maps to one of a small set of hue families
-  (red/orange/…/neutral) from its hex, so "the roll in your hand is orange"
-  is a single tap at any browse depth. Color grids come back hue-sorted —
-  neutrals by lightness first, then the color wheel — which is how you find
-  a color you can see.
+  (red/orange/…/brown/black/gray/white) from its hex, so "the roll in your
+  hand is orange" is a single tap at any browse depth. The family set and
+  boundaries are tuned on the real catalog for a roughly even distribution
+  (see HUE_FAMILIES below). Color grids come back hue-sorted — neutrals by
+  lightness first, then the color wheel — which is how you find a color you
+  can see.
 
 Ranking is "yours first": brands (and hue-filtered results) that match the
 user's own inventory sort ahead of the rest, so the shop's usual suspects are
@@ -81,15 +83,35 @@ _MATERIAL_FAMILIES = (
 _FAMILY_ALIASES = {"NYLON": "PA", "TPE": "TPU"}
 OTHER_FAMILY = "Other"
 
-# Hue families the kiosk's color filter offers. "neutral" is the
-# black/gray/white bucket (low saturation or extreme lightness).
-HUE_FAMILIES = ("red", "orange", "yellow", "green", "blue", "purple", "pink", "neutral")
+# Hue families the kiosk's color filter offers. The set was tuned against the
+# real catalog (Bambu Lab + Polymaker as references) for a *relatively even*
+# distribution: browns get their own family (earth tones are ~12-14% of those
+# brands' palettes and were drowning the orange bucket), and the old combined
+# "neutral" bucket — the largest by far at ~30% — splits into black/gray/white,
+# the most-stocked filament colors of all.
+HUE_FAMILIES = ("red", "orange", "yellow", "green", "blue", "purple", "pink", "brown", "black", "gray", "white")
 
 # Below this saturation (or outside these lightness bounds) a color reads as
 # black/gray/white regardless of its nominal hue angle.
 _NEUTRAL_MAX_SATURATION = 0.15
 _NEUTRAL_MIN_LIGHTNESS = 0.08
 _NEUTRAL_MAX_LIGHTNESS = 0.95
+# Within the neutrals, the black/gray/white boundaries. 0.85 (not lower) keeps
+# "Light Gray" #D1D3D5 (lightness 0.83) in gray rather than white.
+_BLACK_MAX_LIGHTNESS = 0.25
+_WHITE_MIN_LIGHTNESS = 0.85
+
+# Brown is a *warm hue that isn't vivid orange*: within ~8-55° a color reads
+# as brown when it is dark (chocolate/walnut), pale (beige/tan/cream), or
+# muted (caramel/clay) — true oranges are mid-lightness AND saturated. The
+# bounds were fitted so that brown-named catalog colors (brown/beige/tan/
+# chocolate/caramel/terracotta/…) land here at ~95% for the reference brands
+# without stealing any orange-named color.
+_BROWN_MIN_DEG = 8
+_BROWN_MAX_DEG = 55
+_BROWN_MAX_DARK_LIGHTNESS = 0.47
+_BROWN_MIN_PALE_LIGHTNESS = 0.72
+_BROWN_MAX_MUTED_SATURATION = 0.52
 
 _HEX_RE = re.compile(r"^[0-9a-fA-F]{6}")
 
@@ -122,8 +144,18 @@ def hue_bucket(rgba: str | None) -> str | None:
         return None
     h, lightness, s = hls
     if s < _NEUTRAL_MAX_SATURATION or lightness < _NEUTRAL_MIN_LIGHTNESS or lightness > _NEUTRAL_MAX_LIGHTNESS:
-        return "neutral"
+        if lightness < _BLACK_MAX_LIGHTNESS:
+            return "black"
+        if lightness > _WHITE_MIN_LIGHTNESS:
+            return "white"
+        return "gray"
     deg = h * 360
+    if _BROWN_MIN_DEG <= deg < _BROWN_MAX_DEG and (
+        lightness < _BROWN_MAX_DARK_LIGHTNESS
+        or lightness > _BROWN_MIN_PALE_LIGHTNESS
+        or s < _BROWN_MAX_MUTED_SATURATION
+    ):
+        return "brown"
     if deg < 15 or deg >= 345:
         return "red"
     if deg < 45:

@@ -6643,7 +6643,10 @@ export default {
       hueBlue: '青',
       huePurple: '紫',
       huePink: 'ピンク',
-      hueNeutral: '黒 / 白 / グレー',
+      hueBrown: '茶',
+      hueBlack: '黒',
+      hueGray: 'グレー',
+      hueWhite: '白',
     },
     nav: {
       dashboard: 'ダッシュボード',

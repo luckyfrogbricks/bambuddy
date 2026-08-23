@@ -6631,7 +6631,10 @@ export default {
       hueBlue: 'Blu',
       huePurple: 'Viola',
       huePink: 'Rosa',
-      hueNeutral: 'Nero / Bianco / Grigio',
+      hueBrown: 'Marrone',
+      hueBlack: 'Nero',
+      hueGray: 'Grigio',
+      hueWhite: 'Bianco',
     },
     nav: {
       dashboard: 'Dashboard',

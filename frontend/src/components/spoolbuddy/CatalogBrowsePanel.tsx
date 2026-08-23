@@ -26,16 +26,22 @@ interface CatalogBrowsePanelProps {
   onExit: () => void;
 }
 
-// One representative swatch per hue family for the filter rail.
+// One representative swatch per hue family for the filter rail. Family set
+// mirrors the backend's HUE_FAMILIES — tuned on the real catalog so each dot
+// covers a similar share of it (brown carries the earth tones that would
+// otherwise drown orange; black/gray/white each stand alone).
 const HUE_SWATCHES: { hue: BrowseHue; color: string }[] = [
   { hue: 'red', color: '#c12e1f' },
   { hue: 'orange', color: '#ff9016' },
+  { hue: 'brown', color: '#8a5a34' },
   { hue: 'yellow', color: '#fec600' },
   { hue: 'green', color: '#00ae42' },
   { hue: 'blue', color: '#0056b8' },
   { hue: 'purple', color: '#7e3f98' },
   { hue: 'pink', color: '#ec4899' },
-  { hue: 'neutral', color: 'linear-gradient(135deg, #18181b 0% 50%, #e4e4e7 50% 100%)' },
+  { hue: 'black', color: '#131316' },
+  { hue: 'gray', color: '#8e9089' },
+  { hue: 'white', color: '#f6f6f4' },
 ];
 
 export function CatalogBrowsePanel({ nav, onNavChange, onPick, onExit }: CatalogBrowsePanelProps) {
@@ -88,7 +94,10 @@ export function CatalogBrowsePanel({ nav, onNavChange, onPick, onExit }: Catalog
       blue: t('spoolbuddy.barcode.hueBlue', 'Blue'),
       purple: t('spoolbuddy.barcode.huePurple', 'Purple'),
       pink: t('spoolbuddy.barcode.huePink', 'Pink'),
-      neutral: t('spoolbuddy.barcode.hueNeutral', 'Black / White / Gray'),
+      brown: t('spoolbuddy.barcode.hueBrown', 'Brown'),
+      black: t('spoolbuddy.barcode.hueBlack', 'Black'),
+      gray: t('spoolbuddy.barcode.hueGray', 'Gray'),
+      white: t('spoolbuddy.barcode.hueWhite', 'White'),
     })[hue];
 
   // Crumbs jump straight back to their level with everything after them (and

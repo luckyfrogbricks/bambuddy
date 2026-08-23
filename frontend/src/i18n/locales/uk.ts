@@ -6685,7 +6685,10 @@ export default {
       hueBlue: 'Синій',
       huePurple: 'Фіолетовий',
       huePink: 'Рожевий',
-      hueNeutral: 'Чорний / білий / сірий',
+      hueBrown: 'Коричневий',
+      hueBlack: 'Чорний',
+      hueGray: 'Сірий',
+      hueWhite: 'Білий',
     },
     nav: {
       dashboard: "Приладова панель",

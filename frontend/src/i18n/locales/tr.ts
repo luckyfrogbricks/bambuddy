@@ -6586,7 +6586,10 @@ export default {
       hueBlue: 'Mavi',
       huePurple: 'Mor',
       huePink: 'Pembe',
-      hueNeutral: 'Siyah / Beyaz / Gri',
+      hueBrown: 'Kahverengi',
+      hueBlack: 'Siyah',
+      hueGray: 'Gri',
+      hueWhite: 'Beyaz',
     },
     nav: {
       dashboard: 'Gösterge Paneli',

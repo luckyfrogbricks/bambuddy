@@ -6642,7 +6642,10 @@ export default {
       hueBlue: 'Blau',
       huePurple: 'Lila',
       huePink: 'Rosa',
-      hueNeutral: 'Schwarz / Weiß / Grau',
+      hueBrown: 'Braun',
+      hueBlack: 'Schwarz',
+      hueGray: 'Grau',
+      hueWhite: 'Weiß',
     },
     nav: {
       dashboard: 'Übersicht',

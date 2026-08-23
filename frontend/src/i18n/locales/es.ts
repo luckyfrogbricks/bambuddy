@@ -6650,7 +6650,10 @@ export default {
       hueBlue: 'Azul',
       huePurple: 'Morado',
       huePink: 'Rosa',
-      hueNeutral: 'Negro / Blanco / Gris',
+      hueBrown: 'Marrón',
+      hueBlack: 'Negro',
+      hueGray: 'Gris',
+      hueWhite: 'Blanco',
     },
     nav: {
       dashboard: 'Panel',

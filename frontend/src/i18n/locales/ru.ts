@@ -6277,7 +6277,10 @@ export default {
       hueBlue: 'Синий',
       huePurple: 'Фиолетовый',
       huePink: 'Розовый',
-      hueNeutral: 'Чёрный / белый / серый',
+      hueBrown: 'Коричневый',
+      hueBlack: 'Чёрный',
+      hueGray: 'Серый',
+      hueWhite: 'Белый',
     },
     nav: {
       dashboard: "Панель",

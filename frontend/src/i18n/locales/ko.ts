@@ -6289,7 +6289,10 @@ export default {
       hueBlue: '파랑',
       huePurple: '보라',
       huePink: '분홍',
-      hueNeutral: '검정 / 흰색 / 회색',
+      hueBrown: '갈색',
+      hueBlack: '검정',
+      hueGray: '회색',
+      hueWhite: '흰색',
     },
     nav: {
       dashboard: '대시보드',

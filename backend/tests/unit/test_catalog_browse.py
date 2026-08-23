@@ -79,10 +79,24 @@ class TestHueBucket:
         assert hue_bucket("5E43B7FF") == "purple"
         assert hue_bucket("EC008CFF") == "pink"
 
-    def test_neutrals(self):
-        assert hue_bucket("000000FF") == "neutral"  # black: lightness floor
-        assert hue_bucket("FFFFFFFF") == "neutral"  # white: lightness ceiling
-        assert hue_bucket("8E9089FF") == "neutral"  # gray: saturation floor
+    def test_browns(self):
+        # Earth tones are their own family (they were drowning orange): dark,
+        # pale, and muted warm colors all read as brown …
+        assert hue_bucket("6F5034FF") == "brown"  # Cocoa Brown (dark)
+        assert hue_bucket("F7E6DEFF") == "brown"  # Beige (pale)
+        assert hue_bucket("AE835BFF") == "brown"  # Caramel (muted)
+        assert hue_bucket("B15533FF") == "brown"  # Terracotta
+        # … while vivid mid-lightness warm colors stay orange, and dark cool
+        # reds (maroon, ~350°) stay red.
+        assert hue_bucket("FF6A13FF") == "orange"
+        assert hue_bucket("9D2235FF") == "red"
+
+    def test_neutrals_split_black_gray_white(self):
+        assert hue_bucket("000000FF") == "black"
+        assert hue_bucket("3B3B3FFF") == "black"  # charcoal
+        assert hue_bucket("FFFFFFFF") == "white"
+        assert hue_bucket("8E9089FF") == "gray"
+        assert hue_bucket("D1D3D5FF") == "gray"  # Light Gray stays gray, not white
 
     def test_invalid(self):
         assert hue_bucket(None) is None
@@ -91,7 +105,7 @@ class TestHueBucket:
 
     def test_multi_color_hexes(self):
         v = _variant(rgba="000000FF", hexes=["FF9016", "#0056B8"])
-        assert variant_hues(v) == {"neutral", "orange", "blue"}
+        assert variant_hues(v) == {"black", "orange", "blue"}
 
     def test_hue_sort_neutrals_first_dark_to_light(self):
         order = sorted(["FF9016FF", "FFFFFFFF", "000000FF", "C12E1FFF"], key=hue_sort_key)
