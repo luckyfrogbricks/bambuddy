@@ -124,13 +124,27 @@ def _gtin_checksum_valid(digits: str) -> bool:
 _ASIN_RE = re.compile(r"^B0[A-Z0-9]{8}$")
 
 
-def classify_code(raw: str | None) -> tuple[str, str]:
+# AIM symbology families (sent by scanners configured to transmit AIM IDs —
+# see spoolbuddy/daemon/barcode_reader.py) whose symbols carry true GTINs.
+# EAN/UPC symbols encode nothing else, and ITF-14 case codes wrap a GTIN.
+_GTIN_SYMBOLOGIES = ("ean-upc", "itf")
+
+
+def classify_code(raw: str | None, symbology: str | None = None) -> tuple[str, str]:
     """Canonicalize `raw` exactly like `normalize_barcode`, then classify it
     down the ladder: ("gtin", digits) → ("asin", B0-shaped) → ("sku",
     stripped-upper). "sku" is a *candidate*: whether it is a real
     manufacturer SKU or some other box code (lot number, FNSKU) can only be
     decided by external knowledge — a community-DB hit or a user link — not
     by the string itself.
+
+    `symbology` is an optional scan-time hint (AIM symbology family from the
+    hardware scanner). When present and NOT a GTIN-carrying symbology, the
+    GTIN rung is skipped entirely: a Code 128 label wrapping a lot number
+    that happens to pass the mod-10 checksum must not land in `gtin_code`.
+    A GTIN-carrying symbology changes nothing — the checksum still gates the
+    rung — and None (no scanner hint: manual entry, camera scan, older
+    daemon) keeps the pure-heuristic behavior.
 
     Classification runs on the *canonicalized* value, not the raw input, so
     a freshly-scanned barcode and that same barcode already stored on a spool
@@ -151,7 +165,8 @@ def classify_code(raw: str | None) -> tuple[str, str]:
     """
     canonical = normalize_barcode(raw) or ""
     if (
-        canonical.isdigit()
+        (symbology is None or symbology in _GTIN_SYMBOLOGIES)
+        and canonical.isdigit()
         and _MIN_GTIN_LENGTH <= len(canonical) <= _MAX_GTIN_LENGTH
         and _gtin_checksum_valid(canonical.zfill(_MAX_GTIN_LENGTH))
     ):
@@ -275,6 +290,11 @@ class SpoolCreate(SpoolBase):
     # explicitly, and cross-fills the sibling columns from the community DBs
     # under the size-consistency rule. Explicit *_code fields always win.
     scanned_code: str | None = Field(default=None, max_length=64)
+    # Write-only companion to scanned_code: the AIM symbology family the
+    # scanner reported at scan time (e.g. "ean-upc", "code128"). Routing uses
+    # it to keep the scan-time classification — without it, a Code 128 numeric
+    # the scan demoted could re-promote to gtin_code here.
+    scanned_symbology: str | None = Field(default=None, max_length=16)
 
     # The code validators live on the WRITE schemas (here and SpoolUpdate),
     # not SpoolBase — SpoolResponse inherits SpoolBase, and a legacy/

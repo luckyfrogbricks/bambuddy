@@ -240,9 +240,9 @@ async def barcode_poll_loop(config: Config, api: APIClient, shared: dict):
     display: DisplayControl = shared["display"]
     barcode: BarcodeReader = shared["barcode"]
 
-    async def on_scan(code: str):
+    async def on_scan(code: str, symbology: str | None = None):
         display.wake()
-        await api.barcode_scanned(device_id=config.device_id, barcode=code)
+        await api.barcode_scanned(device_id=config.device_id, barcode=code, symbology=symbology)
 
     def is_enabled() -> bool:
         return shared.get("barcode_enabled", True)

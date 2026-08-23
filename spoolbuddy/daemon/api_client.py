@@ -164,17 +164,16 @@ class APIClient:
             },
         )
 
-    async def barcode_scanned(self, device_id: str, barcode: str) -> dict | None:
+    async def barcode_scanned(self, device_id: str, barcode: str, symbology: str | None = None) -> dict | None:
         # buffer=False: a scan that can't reach the backend right now must not
         # replay minutes later and pop a surprise modal on the kiosk.
-        return await self._post(
-            "/barcode/scanned",
-            {
-                "device_id": device_id,
-                "barcode": barcode,
-            },
-            buffer=False,
-        )
+        payload = {
+            "device_id": device_id,
+            "barcode": barcode,
+        }
+        if symbology:
+            payload["symbology"] = symbology
+        return await self._post("/barcode/scanned", payload, buffer=False)
 
     async def tag_removed(self, device_id: str, tag_uid: str) -> dict | None:
         return await self._post(

@@ -23,6 +23,8 @@ const ASIN_RE = /^B0[A-Z0-9]{8}$/;
 // lookups, and catalog picks all normalize to this shape.
 interface Resolved {
   barcode: string;
+  /** AIM symbology hint from the hardware scan; null for manual lookups. */
+  symbology: string | null;
   source: ScannedBarcode['source'];
   material: string | null;
   brand: string | null;
@@ -38,6 +40,7 @@ interface Resolved {
 function fromScan(scan: ScannedBarcode): Resolved {
   return {
     barcode: scan.barcode,
+    symbology: scan.symbology,
     source: scan.source,
     material: scan.material,
     brand: scan.brand,
@@ -246,6 +249,7 @@ export function BarcodeAddModal({
         applyResolved(
           {
             barcode: res.barcode,
+            symbology: null,
             source: res.source,
             material: res.material,
             brand: res.brand,
@@ -336,6 +340,7 @@ export function BarcodeAddModal({
     (row: CatalogSearchRow) => {
       setResolved((prev) => ({
         barcode: prev?.barcode ?? resolved?.barcode ?? '',
+        symbology: prev?.symbology ?? resolved?.symbology ?? null,
         source: 'inventory',
         material: row.material,
         brand: row.brand,
@@ -402,6 +407,7 @@ export function BarcodeAddModal({
         // The raw scanned code — the backend classifies it down the ladder
         // (GTIN/ASIN/SKU/other) and cross-fills siblings size-consistently.
         scanned_code: r.barcode || null,
+        scanned_symbology: r.barcode ? r.symbology : null,
         // Explicit typed codes ONLY from a Find pick: those rows are
         // per-package by construction, so their codes are safe to store.
         // A plain scan's linked_codes may span package sizes (OFD variants),

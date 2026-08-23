@@ -410,7 +410,7 @@ async def barcode_scanned(
         # grab within one heartbeat of the toggle turning off).
         return {"status": "ok", "matched": False, "ignored": True}
 
-    canonical, kind = classify_code(req.barcode)
+    canonical, kind = classify_code(req.barcode, symbology=req.symbology)
     valid = bool(canonical) and len(canonical) >= 3
 
     fields: dict = {}
@@ -440,6 +440,7 @@ async def barcode_scanned(
             "type": "spoolbuddy_barcode_scanned",
             "device_id": req.device_id,
             "kind": kind,
+            "symbology": req.symbology,
             "valid": valid,
             **lookup.model_dump(exclude={"enabled"}),
         }

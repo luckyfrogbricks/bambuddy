@@ -33,6 +33,7 @@ function makeScan(over: Partial<ScannedBarcode> = {}): ScannedBarcode {
   return {
     barcode: '6975337031234',
     kind: 'gtin',
+    symbology: 'ean-upc',
     valid: true,
     matched: true,
     source: 'ofd',
@@ -105,6 +106,9 @@ describe('BarcodeAddModal', () => {
     await waitFor(() => expect(api.createSpool).toHaveBeenCalledTimes(1));
     const payload = (api.createSpool as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(payload.scanned_code).toBe('6975337031234');
+    // The scan's AIM symbology hint rides along so backend routing keeps
+    // the scan-time classification.
+    expect(payload.scanned_symbology).toBe('ean-upc');
     expect(payload.material).toBe('PLA');
     expect(payload.tag_uid).toBe('0C1C8364');
     expect(payload.data_origin).toBe('barcode_scan');

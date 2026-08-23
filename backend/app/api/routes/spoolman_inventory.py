@@ -344,6 +344,9 @@ class SpoolmanInventoryCreate(BaseModel):
     # Write-only: the raw scanned code, routed into the typed extras exactly
     # like the local-mode create (classify ladder + size-consistent cross-fill).
     scanned_code: str | None = Field(None, max_length=64)
+    # Write-only companion: AIM symbology family from scan time (see
+    # SpoolCreate.scanned_symbology) so routing can't re-promote a demoted code.
+    scanned_symbology: str | None = Field(None, max_length=16)
 
     @field_validator("gtin_code")
     @classmethod
@@ -641,7 +644,10 @@ async def create_spool(
         # Route the raw scanned code exactly like the local-mode create:
         # classify ladder + size-consistent cross-fill. Explicit fields win.
         routed = await route_scanned_code(
-            data.scanned_code, await _settings_map(db), bought_as_refill=bool(data.bought_as_refill)
+            data.scanned_code,
+            await _settings_map(db),
+            bought_as_refill=bool(data.bought_as_refill),
+            symbology=data.scanned_symbology,
         )
         key_map = {
             "gtin_code": "bambu_gtin_code",

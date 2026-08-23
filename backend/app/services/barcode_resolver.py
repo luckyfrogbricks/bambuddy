@@ -273,6 +273,7 @@ async def route_scanned_code(
     scanned: str | None,
     settings: dict[str, str],
     bought_as_refill: bool = False,
+    symbology: str | None = None,
 ) -> dict[str, str | None]:
     """Route a raw scanned code into the typed spool columns.
 
@@ -299,7 +300,10 @@ async def route_scanned_code(
     }
     if not scanned or not scanned.strip():
         return routed
-    canonical, kind = classify_code(scanned)
+    # `symbology` carries the scanner's AIM hint from scan time so routing at
+    # create time can't re-promote a code the scan already demoted (a Code 128
+    # numeric with a lucky checksum must not become a GTIN here).
+    canonical, kind = classify_code(scanned, symbology=symbology)
     if not canonical:
         return routed
 

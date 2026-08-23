@@ -447,6 +447,25 @@ class TestRouteScannedCode:
         assert routed["gtin_code"] == "6938936716785"
         assert routed["other_code"] is None
 
+    async def test_code128_symbology_demotes_lucky_checksum_at_routing(self):
+        """The scan-time AIM hint must survive into create-time routing: a
+        Code 128 numeric with a valid mod-10 checksum, unknown to both DBs,
+        lands in other_code — NOT re-promoted into gtin_code."""
+        with _patch_external():
+            routed = await route_scanned_code("06938936716785", ENABLED, symbology="code128")
+        assert routed == {
+            "gtin_code": None,
+            "asin_code": None,
+            "sku_code": None,
+            "other_code": "06938936716785",
+        }
+
+    async def test_ean_upc_symbology_routes_gtin_normally(self):
+        with _patch_external(ofd_paired=(True, "17600")):
+            routed = await route_scanned_code("06938936716785", ENABLED, symbology="ean-upc")
+        assert routed["gtin_code"] == "6938936716785"
+        assert routed["sku_code"] == "17600"
+
     async def test_unknown_code_lands_verbatim_in_other_code(self):
         """Not a GTIN, not an ASIN, unknown to both DBs: the user's own code
         space — trimmed, case preserved, no other column touched."""

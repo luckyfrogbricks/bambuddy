@@ -1308,7 +1308,8 @@ async def create_spool(
     # read, routed below into the typed *_code columns with same-package
     # siblings cross-filled. Popped before building the ORM object.
     scanned_code = data_dict.pop("scanned_code", None)
-    fields_set = set(spool_data.model_fields_set) - {"scanned_code"}
+    scanned_symbology = data_dict.pop("scanned_symbology", None)
+    fields_set = set(spool_data.model_fields_set) - {"scanned_code", "scanned_symbology"}
     try:
         payload = await prepare_internal_spool_payload(db, data_dict, fields_set)
     except ValueError as exc:
@@ -1316,7 +1317,10 @@ async def create_spool(
     if scanned_code:
         settings = await _load_settings_map(db)
         routed = await route_scanned_code(
-            scanned_code, settings, bought_as_refill=bool(payload.get("bought_as_refill"))
+            scanned_code,
+            settings,
+            bought_as_refill=bool(payload.get("bought_as_refill")),
+            symbology=scanned_symbology,
         )
         # Explicitly-supplied columns always win over routed/cross-filled ones.
         for column, value in routed.items():
@@ -1357,7 +1361,8 @@ async def bulk_create_spools(
     # Same write-only pop as create_spool above; the batch shares one scanned
     # code, so it routes/cross-fills once, not once per spool.
     scanned_code = data_dict.pop("scanned_code", None)
-    fields_set = set(data.spool.model_fields_set) - {"scanned_code"}
+    scanned_symbology = data_dict.pop("scanned_symbology", None)
+    fields_set = set(data.spool.model_fields_set) - {"scanned_code", "scanned_symbology"}
     try:
         payload = await prepare_internal_spool_payload(db, data_dict, fields_set)
     except ValueError as exc:
@@ -1365,7 +1370,10 @@ async def bulk_create_spools(
     if scanned_code:
         settings = await _load_settings_map(db)
         routed = await route_scanned_code(
-            scanned_code, settings, bought_as_refill=bool(payload.get("bought_as_refill"))
+            scanned_code,
+            settings,
+            bought_as_refill=bool(payload.get("bought_as_refill")),
+            symbology=scanned_symbology,
         )
         for column, value in routed.items():
             if value and not payload.get(column):

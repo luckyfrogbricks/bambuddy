@@ -36,6 +36,7 @@ _KEYS = {
     "KEY_DOT": 52,
     "KEY_SLASH": 53,
     "KEY_SPACE": 57,
+    "KEY_RIGHTBRACE": 27,
 }
 # Letters KEY_A..KEY_Z on a US layout are not contiguous; explicit map.
 _LETTER_CODES = {
@@ -86,6 +87,7 @@ for d in "1234567890":
     _CHAR_TO_CODE[d] = getattr(ECODES, f"KEY_{d}")
 for letter, code in _LETTER_CODES.items():
     _CHAR_TO_CODE[letter.lower()] = code
+_CHAR_TO_CODE["]"] = ECODES.KEY_RIGHTBRACE
 
 
 class FakeEvent:
@@ -196,6 +198,41 @@ class TestDecode:
         assert r._drain() == "2"
 
 
+# --- AIM symbology prefix ---------------------------------------------------
+
+
+class TestSplitAimPrefix:
+    def test_ean_upc_prefix(self):
+        assert br.split_aim_prefix("]E06975337031234") == ("ean-upc", "6975337031234")
+
+    def test_itf_prefix(self):
+        assert br.split_aim_prefix("]I016975337031231") == ("itf", "16975337031231")
+
+    def test_code128_prefix(self):
+        assert br.split_aim_prefix("]C06975337031234") == ("code128", "6975337031234")
+
+    def test_unknown_code_char_passes_through_raw(self):
+        # Unmapped AIM letter: still stripped, family reported verbatim.
+        assert br.split_aim_prefix("]X0ABC123") == ("X", "ABC123")
+
+    def test_no_prefix_is_untouched(self):
+        assert br.split_aim_prefix("6975337031234") == (None, "6975337031234")
+
+    def test_non_digit_modifier_is_not_a_prefix(self):
+        # AIM modifier is a digit; "]EX..." is just data.
+        assert br.split_aim_prefix("]EXTRA") == (None, "]EXTRA")
+
+    def test_bare_prefix_without_data_is_untouched(self):
+        assert br.split_aim_prefix("]E0") == (None, "]E0")
+
+    def test_decodes_from_hid_events(self, patched_evdev):
+        # The scanner "types" the prefix — "]" must survive the keymap.
+        dev = FakeInputDevice()
+        dev.enqueue_scan("]E06975337031234")
+        r = _reader_with_device(dev)
+        assert r._drain() == "]E06975337031234"
+
+
 # --- Accept / debounce / length -------------------------------------------
 
 
@@ -269,7 +306,7 @@ class TestRunLoop:
         r._wait_readable = lambda timeout: True  # fd 42 isn't a real socket
 
         scanned = []
-        on_scan = AsyncMock(side_effect=lambda code: scanned.append(code))
+        on_scan = AsyncMock(side_effect=lambda code, symbology: scanned.append((code, symbology)))
 
         task = asyncio.create_task(r.run(on_scan))
         await asyncio.sleep(0.05)
@@ -278,7 +315,29 @@ class TestRunLoop:
             await task
         except asyncio.CancelledError:
             pass
-        assert scanned == ["6975337031234"]
+        assert scanned == [("6975337031234", None)]
+
+    @pytest.mark.asyncio
+    async def test_aim_prefix_is_stripped_and_reported(self, patched_evdev):
+        dev = FakeInputDevice()
+        dev.enqueue_scan("]E06975337031234")
+        r = BarcodeReader()
+        r._device = dev
+        r._keymap = br._build_keycode_map(ECODES)
+        r.ok = True
+        r._wait_readable = lambda timeout: True
+
+        scanned = []
+        on_scan = AsyncMock(side_effect=lambda code, symbology: scanned.append((code, symbology)))
+
+        task = asyncio.create_task(r.run(on_scan))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert scanned == [("6975337031234", "ean-upc")]
 
     @pytest.mark.asyncio
     async def test_disabled_releases_grab(self, patched_evdev):

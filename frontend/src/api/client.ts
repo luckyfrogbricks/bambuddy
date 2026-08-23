@@ -3439,6 +3439,7 @@ export interface InventorySpool {
   // it (GTIN / ASIN / SKU-candidate / other) and cross-fills the sibling
   // columns from the community DBs under the size-consistency rule.
   scanned_code?: string | null;
+  scanned_symbology?: string | null;
   // How the roll was PURCHASED (refill coil vs boxed with a spool) — not
   // current physical state (that's core_weight). Drives the "Refill pack" badge.
   bought_as_refill?: boolean;

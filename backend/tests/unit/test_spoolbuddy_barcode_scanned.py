@@ -108,6 +108,59 @@ class TestBarcodeScanned:
         assert payload["material"] is None
 
     @pytest.mark.asyncio
+    async def test_code128_symbology_demotes_lucky_checksum_numeric(self):
+        # 06938936716785 passes the GTIN checksum, but the scanner read it
+        # from a Code 128 symbol — an arbitrary wrapped numeric (lot number),
+        # so the GTIN rung must be skipped and the kind fall down the ladder.
+        req = BarcodeScannedRequest(device_id="sb-1", barcode="06938936716785", symbology="code128")
+        db = _db_returning(_device())
+        resolve = AsyncMock(return_value=({}, None, []))
+
+        with (
+            patch("backend.app.services.barcode_resolver.resolve_barcode", new=resolve),
+            patch("backend.app.api.routes.inventory._load_settings_map", new=AsyncMock(return_value={})),
+            patch("backend.app.api.routes.inventory._ensure_spoolman_client", new=AsyncMock(return_value=None)),
+            patch("backend.app.api.routes.spoolbuddy.ws_manager.broadcast", new=AsyncMock()) as mock_bcast,
+        ):
+            await barcode_scanned(req=req, db=db, _=None)
+
+        # Resolution ran with the demoted kind, and the WS payload reports it.
+        assert resolve.await_args[0][2] == "sku"
+        payload = mock_bcast.call_args[0][0]
+        assert payload["kind"] == "sku"
+        assert payload["symbology"] == "code128"
+
+    @pytest.mark.asyncio
+    async def test_ean_upc_symbology_keeps_gtin_kind(self):
+        req = BarcodeScannedRequest(device_id="sb-1", barcode="06938936716785", symbology="ean-upc")
+        db = _db_returning(_device())
+
+        with (
+            _patch_resolution({}, None, []),
+            patch("backend.app.api.routes.spoolbuddy.ws_manager.broadcast", new=AsyncMock()) as mock_bcast,
+        ):
+            await barcode_scanned(req=req, db=db, _=None)
+
+        payload = mock_bcast.call_args[0][0]
+        assert payload["kind"] == "gtin"
+        assert payload["symbology"] == "ean-upc"
+
+    @pytest.mark.asyncio
+    async def test_no_symbology_keeps_heuristic_and_null_field(self):
+        req = BarcodeScannedRequest(device_id="sb-1", barcode="06938936716785")
+        db = _db_returning(_device())
+
+        with (
+            _patch_resolution({}, None, []),
+            patch("backend.app.api.routes.spoolbuddy.ws_manager.broadcast", new=AsyncMock()) as mock_bcast,
+        ):
+            await barcode_scanned(req=req, db=db, _=None)
+
+        payload = mock_bcast.call_args[0][0]
+        assert payload["kind"] == "gtin"
+        assert payload["symbology"] is None
+
+    @pytest.mark.asyncio
     async def test_invalid_code_skips_resolution(self):
         # "12" canonicalizes to a <3-char code → invalid, resolution not called.
         req = BarcodeScannedRequest(device_id="sb-1", barcode="12")

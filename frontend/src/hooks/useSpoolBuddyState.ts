@@ -26,6 +26,10 @@ export type { LinkedCode } from '../api/client';
 export type ScannedBarcode = Omit<BarcodeLookupResult, 'enabled' | 'source'> & {
   source: BarcodeLookupResult['source'] | 'parsed';
   kind: string;
+  /** AIM symbology family from the hardware scanner (null unless it is
+   * configured to transmit AIM IDs). Forwarded on create so the backend
+   * routes the code with the same evidence it classified it with. */
+  symbology: string | null;
   valid: boolean;
   deviceId: string;
   // Monotonic-ish receipt timestamp (Date.now) so consumers can ignore a
@@ -210,6 +214,7 @@ export function useSpoolBuddyState() {
       scan: {
         barcode: d.barcode ?? '',
         kind: d.kind ?? 'gtin',
+        symbology: d.symbology ?? null,
         valid: d.valid ?? false,
         matched: d.matched ?? false,
         source: d.source ?? null,

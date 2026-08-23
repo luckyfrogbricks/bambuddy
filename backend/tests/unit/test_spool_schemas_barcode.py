@@ -99,6 +99,27 @@ class TestClassifyCode:
         assert classify_code(raw) == ("36000291452", "gtin")
         assert classify_code(stored) == ("36000291452", "gtin")
 
+    def test_code128_symbology_skips_the_gtin_rung(self):
+        """A Code 128 symbol wraps arbitrary data — a numeric that happens to
+        pass the mod-10 checksum (a lot number, an internal article code) must
+        not be promoted to gtin when the scanner says the symbol wasn't
+        EAN/UPC/ITF."""
+        assert classify_code("06938936716785", symbology="code128") == ("6938936716785", "sku")
+
+    def test_gtin_symbologies_keep_the_checksum_gate(self):
+        # A GTIN-carrying symbology changes nothing: valid checksums still
+        # classify gtin, invalid ones still fall through.
+        assert classify_code("06938936716785", symbology="ean-upc") == ("6938936716785", "gtin")
+        assert classify_code("16938936716782", symbology="itf") == ("16938936716782", "gtin")
+        assert classify_code("099999999999", symbology="ean-upc") == ("99999999999", "sku")
+
+    def test_non_gtin_symbology_still_walks_the_rest_of_the_ladder(self):
+        # ASINs live in Code 128 symbols — the ASIN rung must still fire.
+        assert classify_code("B0CJLR62MF", symbology="code128") == ("B0CJLR62MF", "asin")
+
+    def test_no_symbology_keeps_pure_heuristic(self):
+        assert classify_code("06938936716785", symbology=None) == ("6938936716785", "gtin")
+
     def test_classification_is_stable_across_normalize_barcode(self):
         """classify_code(x) == classify_code(normalize_barcode(x)) for any x —
         this is what guarantees a scan (raw input) and a repeat lookup of the

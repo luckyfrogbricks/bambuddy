@@ -496,6 +496,7 @@ async def parse_and_validate(raw_bytes: bytes, db: AsyncSession) -> ImportPrevie
         # it must not leak into the persisted dict. The CSV carries the typed
         # code columns directly, so it's always the default (None) here.
         spool_data.pop("scanned_code", None)
+        spool_data.pop("scanned_symbology", None)
         if last_used is not None:
             # last_used isn't a SpoolCreate field; graft it onto the persisted
             # dict so the ORM object carries it.

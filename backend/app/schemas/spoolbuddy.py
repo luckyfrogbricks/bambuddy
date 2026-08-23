@@ -115,6 +115,10 @@ class TagRemovedRequest(BaseModel):
 class BarcodeScannedRequest(BaseModel):
     device_id: str = Field(..., max_length=50)
     barcode: str = Field(..., min_length=1, max_length=64)
+    # AIM symbology family (e.g. "ean-upc", "code128") when the scanner is
+    # configured to transmit AIM IDs; absent on older daemons and scanners
+    # left at factory defaults.
+    symbology: str | None = Field(None, max_length=16)
 
 
 class ScannerSettingsRequest(BaseModel):

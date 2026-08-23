@@ -50,6 +50,34 @@ RESCAN_INTERVAL_S = 5.0  # how often to look for a (re)plugged scanner
 IDLE_SELECT_S = 0.5  # blocking-select window while no scan is in progress
 
 
+# AIM symbology identifiers (ISO/IEC 15424): "]" + a code character + a
+# modifier digit, prepended to the data only when the scanner is configured
+# to transmit them (a config barcode in the DE2120 manual enables it). With
+# the prefix present the backend KNOWS the symbology — e.g. a true EAN/UPC
+# read versus a Code 128 wrapping an arbitrary numeric string — instead of
+# inferring GTIN-ness from the digits alone.
+_AIM_FAMILIES = {
+    "E": "ean-upc",  # EAN-13 / EAN-8 / UPC-A / UPC-E
+    "I": "itf",  # Interleaved 2 of 5 (ITF-14 case codes carry GTINs)
+    "C": "code128",
+    "A": "code39",
+    "Q": "qr",
+    "d": "datamatrix",
+}
+
+
+def split_aim_prefix(code: str) -> tuple[str | None, str]:
+    """Split a leading AIM symbology identifier off a decoded scan.
+
+    Returns (symbology_family, remaining_code). Scanners not configured to
+    send AIM IDs are unaffected: anything that doesn't match the strict
+    ``]Xn`` + data shape passes through untouched as (None, code).
+    """
+    if len(code) >= 4 and code[0] == "]" and code[2].isdigit():
+        return _AIM_FAMILIES.get(code[1], code[1]), code[3:]
+    return None, code
+
+
 def _build_keycode_map(codes) -> dict[int, tuple[str, str]]:
     """Map evdev keycodes to (plain, shifted) characters.
 
@@ -65,6 +93,9 @@ def _build_keycode_map(codes) -> dict[int, tuple[str, str]]:
     for ch in "abcdefghijklmnopqrstuvwxyz":
         keymap[getattr(codes, f"KEY_{ch.upper()}")] = (ch, ch.upper())
     keymap[codes.KEY_MINUS] = ("-", "_")
+    # "]" opens the AIM symbology identifier (e.g. "]E0") — without this the
+    # prefix would decode as a bare "E0" glued onto the barcode digits.
+    keymap[codes.KEY_RIGHTBRACE] = ("]", "}")
     keymap[codes.KEY_DOT] = (".", ">")
     keymap[codes.KEY_SLASH] = ("/", "?")
     keymap[codes.KEY_EQUAL] = ("=", "+")
@@ -258,9 +289,11 @@ class BarcodeReader:
                 await asyncio.sleep(1.0)
                 continue
 
-            if code and self._accept(code):
-                logger.info("Barcode scanned: %s", code)
-                try:
-                    await on_scan(code)
-                except Exception:
-                    logger.exception("Barcode scan handler failed")
+            if code:
+                symbology, code = split_aim_prefix(code)
+                if self._accept(code):
+                    logger.info("Barcode scanned: %s", code)
+                    try:
+                        await on_scan(code, symbology)
+                    except Exception:
+                        logger.exception("Barcode scan handler failed")
