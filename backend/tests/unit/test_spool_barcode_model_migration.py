@@ -8,12 +8,6 @@ Covers the DB-layer guarantees the feature stands on:
   DATABASE_URL (the exact failure mode a Postgres-based dev environment hit
   reviewing PR #1895).
 - A fresh create_all() install carries the columns + their indexes.
-- The TEMPORARY interim-schema teardown (`_migrate_drop_interim_spool_code_schema`,
-  stripped before the upstream PR) routes the old primary code into the right
-  typed column, carries the refill flag, deliberately does NOT migrate
-  sibling rows (they contained other package sizes' codes — the cross-size
-  contamination this schema change eliminates), and is a no-op on databases
-  that never ran the interim branch.
 """
 
 from __future__ import annotations
@@ -22,10 +16,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from backend.app.core.database import (
-    _migrate_add_spool_code_columns,
-    _migrate_drop_interim_spool_code_schema,
-)
+from backend.app.core.database import _migrate_add_spool_code_columns
 
 CODE_COLUMNS = ("gtin_code", "asin_code", "sku_code", "other_code", "bought_as_refill")
 
@@ -93,89 +84,3 @@ class TestAddSpoolCodeColumnsMigration:
                 assert "spool_code" not in tables
         finally:
             await eng.dispose()
-
-
-class TestDropInterimSpoolCodeSchema:
-    """TEMPORARY (local-only) migration — these tests are stripped together
-    with the migration before the upstream PR."""
-
-    async def _build_interim_schema(self, conn):
-        await conn.execute(
-            text("CREATE TABLE spool (id INTEGER PRIMARY KEY, material VARCHAR(50), barcode VARCHAR(64))")
-        )
-        await conn.execute(
-            text(
-                "CREATE TABLE spool_code (id INTEGER PRIMARY KEY, spool_id INTEGER, code VARCHAR(64), "
-                "kind VARCHAR(16), is_refill BOOLEAN, is_primary BOOLEAN)"
-            )
-        )
-        await _migrate_add_spool_code_columns(conn)
-
-    async def test_routes_primary_codes_and_refill_flag(self, engine):
-        async with engine.begin() as conn:
-            await self._build_interim_schema(conn)
-            # Roll 1: scanned a GTIN, bought as refill. Its sibling rows
-            # include another package's SKU that must NOT be migrated.
-            await conn.execute(text("INSERT INTO spool (id, material, barcode) VALUES (1, 'PLA', '6938936716785')"))
-            await conn.execute(
-                text(
-                    "INSERT INTO spool_code (spool_id, code, kind, is_refill, is_primary) VALUES "
-                    "(1, '6938936716785', 'gtin', 1, 1), (1, 'OTHERSIZESKU', 'sku', 0, 0)"
-                )
-            )
-            # Roll 2: scanned an alphanumeric code (stored as sku kind).
-            await conn.execute(text("INSERT INTO spool (id, material, barcode) VALUES (2, 'PLA', 'ALZMNTABS01')"))
-            await conn.execute(
-                text(
-                    "INSERT INTO spool_code (spool_id, code, kind, is_refill, is_primary) VALUES "
-                    "(2, 'ALZMNTABS01', 'sku', 0, 1)"
-                )
-            )
-            # Roll 3: no codes at all — untouched.
-            await conn.execute(text("INSERT INTO spool (id, material) VALUES (3, 'PLA')"))
-
-            await _migrate_drop_interim_spool_code_schema(conn)
-
-            rows = (
-                await conn.execute(
-                    text("SELECT id, gtin_code, sku_code, other_code, bought_as_refill FROM spool ORDER BY id")
-                )
-            ).fetchall()
-            by_id = {r[0]: r for r in rows}
-            assert by_id[1][1] == "6938936716785"  # gtin routed
-            assert by_id[1][2] is None  # sibling SKU deliberately NOT migrated
-            assert bool(by_id[1][4]) is True  # refill flag carried
-            assert by_id[2][2] == "ALZMNTABS01"  # sku-candidate routed to sku_code
-            assert bool(by_id[2][4]) is False
-            assert by_id[3][1] is None and by_id[3][2] is None
-
-            # Interim schema gone.
-            tables = {
-                r[0] for r in (await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))).fetchall()
-            }
-            assert "spool_code" not in tables
-            assert "barcode" not in await _spool_columns(conn)
-
-    async def test_asin_barcode_routes_to_asin_code(self, engine):
-        async with engine.begin() as conn:
-            await self._build_interim_schema(conn)
-            await conn.execute(text("INSERT INTO spool (id, material, barcode) VALUES (1, 'PLA', 'B0CJLR62MF')"))
-            await conn.execute(
-                text(
-                    "INSERT INTO spool_code (spool_id, code, kind, is_refill, is_primary) VALUES "
-                    "(1, 'B0CJLR62MF', 'sku', 0, 1)"
-                )
-            )
-            await _migrate_drop_interim_spool_code_schema(conn)
-            row = (await conn.execute(text("SELECT asin_code, sku_code FROM spool WHERE id = 1"))).fetchone()
-            assert row[0] == "B0CJLR62MF"
-            assert row[1] is None
-
-    async def test_noop_without_interim_table(self, engine):
-        """A database that never ran the interim branch (fresh install, or
-        upstream once this migration is stripped) must pass through untouched."""
-        async with engine.begin() as conn:
-            await conn.execute(text("CREATE TABLE spool (id INTEGER PRIMARY KEY, material VARCHAR(50))"))
-            await _migrate_add_spool_code_columns(conn)
-            await _migrate_drop_interim_spool_code_schema(conn)  # must not raise
-            assert set(CODE_COLUMNS) <= await _spool_columns(conn)
