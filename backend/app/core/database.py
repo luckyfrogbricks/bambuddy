@@ -329,7 +329,6 @@ async def init_db():
         spool,
         spool_assignment,
         spool_catalog,
-        spool_code,
         spool_k_profile,
         spool_usage_history,
         spoolbuddy_device,
@@ -4436,23 +4435,87 @@ async def run_migrations(conn):
         conn, "ALTER TABLE notification_providers ADD COLUMN on_ams_drying_suspended BOOLEAN DEFAULT TRUE"
     )
 
-    # Migration: barcode support for spools (#2648).
-    await _migrate_add_spool_barcode(conn)
+    # Migration: typed code columns for spools (#2648).
+    await _migrate_add_spool_code_columns(conn)
+    # TEMPORARY (local-only) — strip before the upstream PR: tears down the
+    # interim branch's spool_code table + barcode column, which only ever
+    # existed on installs that ran that branch.
+    await _migrate_drop_interim_spool_code_schema(conn)
 
 
-async def _migrate_add_spool_barcode(conn) -> None:
-    """Add the spool.barcode column + index for scan-to-add lookups (#2648).
+async def _migrate_add_spool_code_columns(conn) -> None:
+    """Add the typed code columns for scan-to-add lookups (#2648).
 
-    Stores the canonicalized (no leading zeros) UPC/EAN — or manufacturer
-    SKU — of a scanned spool so a later scan of the same code resolves from
-    the user's own inventory before falling back to the external community
-    databases. The model declares index=True, so fresh installs get the index
-    from create_all(); migrated databases need it spelled out. The companion
-    spool_code table is entirely new (created by create_all(), CHECK
-    constraint and all), so no ALTER is ever needed for it on either dialect.
+    ``gtin_code`` stores the retail barcode ONLY (canonicalized, checksum
+    valid); ``sku_code`` the manufacturer SKU/article number; ``asin_code``
+    an Amazon ASIN; ``other_code`` a user-owned free code. ``bought_as_refill``
+    records purchase form (refill coil vs boxed with spool). Any stored code
+    resolves a later scan from the user's own inventory before the external
+    community databases. The model declares index=True on the searched
+    columns, so fresh installs get the indexes from create_all(); migrated
+    databases need them spelled out.
     """
-    await _safe_execute(conn, "ALTER TABLE spool ADD COLUMN barcode VARCHAR(64)")
-    await _safe_execute(conn, "CREATE INDEX IF NOT EXISTS ix_spool_barcode ON spool (barcode)")
+    await _safe_execute(conn, "ALTER TABLE spool ADD COLUMN gtin_code VARCHAR(64)")
+    await _safe_execute(conn, "ALTER TABLE spool ADD COLUMN asin_code VARCHAR(16)")
+    await _safe_execute(conn, "ALTER TABLE spool ADD COLUMN sku_code VARCHAR(64)")
+    await _safe_execute(conn, "ALTER TABLE spool ADD COLUMN other_code VARCHAR(64)")
+    await _safe_execute(conn, "ALTER TABLE spool ADD COLUMN bought_as_refill BOOLEAN DEFAULT FALSE")
+    await _safe_execute(conn, "CREATE INDEX IF NOT EXISTS ix_spool_gtin_code ON spool (gtin_code)")
+    await _safe_execute(conn, "CREATE INDEX IF NOT EXISTS ix_spool_asin_code ON spool (asin_code)")
+    await _safe_execute(conn, "CREATE INDEX IF NOT EXISTS ix_spool_sku_code ON spool (sku_code)")
+
+
+async def _migrate_drop_interim_spool_code_schema(conn) -> None:
+    """TEMPORARY (local-only): migrate data off the interim branch's schema.
+
+    STRIP THIS FUNCTION (and its call) BEFORE PUBLISHING THE UPSTREAM PR —
+    upstream never saw the interim ``spool_code`` table or ``spool.barcode``
+    column; only installs that ran the interim feature branch (Andrew's prod,
+    possibly Victor's) carry them.
+
+    Per spool: routes the old ``barcode`` value plus its ``spool_code`` rows
+    through the classification ladder into the typed columns, sets
+    ``bought_as_refill`` from the primary code row's flag, then drops the
+    table and the old column.
+    """
+    from sqlalchemy import text
+
+    from backend.app.core.db_dialect import is_sqlite
+    from backend.app.schemas.spool import classify_code
+
+    # Only act when the interim table actually exists.
+    table_probe = (
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='spool_code'"
+        if is_sqlite()
+        else "SELECT tablename FROM pg_tables WHERE tablename = 'spool_code'"
+    )
+    has_table = (await conn.execute(text(table_probe))).scalar()
+    if not has_table:
+        return
+
+    # Route ONLY the primary (scanned/typed) code. The sibling rows are NOT
+    # migrated: under the old model they included other package sizes' codes
+    # (the cross-size contamination this schema change eliminates), and
+    # copying them into the typed columns would bake that bug into the new
+    # data. Anything they represented is re-derivable from the community
+    # caches at the next scan.
+    primary_refill_rows = (
+        await conn.execute(text("SELECT spool_id FROM spool_code WHERE is_primary AND is_refill"))
+    ).all()
+    refill_spool_ids = {row[0] for row in primary_refill_rows}
+
+    spools = (await conn.execute(text("SELECT id, barcode FROM spool WHERE barcode IS NOT NULL"))).all()
+    for spool_id, barcode in spools:
+        canonical, ladder_kind = classify_code(barcode)
+        column = {"gtin": "gtin_code", "asin": "asin_code"}.get(ladder_kind, "sku_code")
+        await conn.execute(
+            text(f"UPDATE spool SET {column} = :code, bought_as_refill = :refill WHERE id = :id"),  # noqa: S608
+            {"code": canonical, "refill": spool_id in refill_spool_ids, "id": spool_id},
+        )
+
+    await _safe_execute(conn, "DROP TABLE IF EXISTS spool_code")
+    await _safe_execute(conn, "DROP INDEX IF EXISTS ix_spool_barcode")
+    await _safe_execute(conn, "ALTER TABLE spool DROP COLUMN barcode")
 
 
 async def _migrate_backfill_variant_groups(conn) -> None:

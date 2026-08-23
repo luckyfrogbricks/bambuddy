@@ -1,10 +1,10 @@
-"""Barcode resolution + persistence: the one engine every barcode path shares.
+"""Barcode resolution + code routing: the one engine every barcode path shares.
 
 A scanned/typed code resolves through one chain — the user's own inventory
 first (instant, offline, exact), then the Open Filament Database, then
-SpoolmanDB-Community — and persists through one funnel that stores the
-primary code plus every cross-referenced sibling (other package-size GTINs,
-the refill-pack GTIN, the manufacturer SKU) as ``SpoolCode`` rows.
+SpoolmanDB-Community — and, on create, routes into the spool's typed code
+columns (``gtin_code`` / ``asin_code`` / ``sku_code`` / ``other_code``) with
+same-package siblings cross-filled from the community databases.
 
 Living in the services layer (rather than inside ``routes/inventory.py``)
 is deliberate: the web inventory routes, the SpoolBuddy scan endpoint, CSV
@@ -14,10 +14,11 @@ this replaces were a recurring source of drift bugs (scan and save
 classifying the same code differently, paths missing the lookup toggle).
 
 The ``barcode_lookup_enabled`` setting gates every external call in exactly
-one place — ``external_all_codes`` — which every read *and* write path
-funnels through. With the toggle off, saving a spool that carries a barcode
-must not download anything: on a first-ever offline instance the OFD/tarball
-timeouts would otherwise block that save for minutes under the refresh lock.
+one place — ``external_all_codes`` (and the routing helper, which funnels
+through the same flag) — so with the toggle off, saving a spool that carries
+a code must not download anything: on a first-ever offline instance the
+OFD/tarball timeouts would otherwise block that save for minutes under the
+refresh lock.
 
 Callers supply the settings map and (when Spoolman mode is active) the
 SpoolmanClient — loading those is request-plumbing that stays in the routes
@@ -29,11 +30,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.spool import Spool
-from backend.app.models.spool_code import SpoolCode
 from backend.app.schemas.spool import classify_code
 from backend.app.services import ofd_client, spoolmandb_community_client
 
@@ -62,6 +62,23 @@ def barcode_lookup_enabled(settings: dict[str, str]) -> bool:
     return settings.get("barcode_lookup_enabled", "true") == "true"
 
 
+def codes_for_spool(spool: Spool) -> list[dict]:
+    """The typed code columns of one spool as lookup/display code dicts.
+
+    Every stored code carries the roll's ``bought_as_refill`` — they all name
+    the same purchasable package, so the flag is shared. ``kind`` stays in the
+    "gtin" | "sku" vocabulary of LinkedCode (ASINs/user codes file as "sku",
+    matching how the community databases file them).
+    """
+    codes: list[dict] = []
+    if spool.gtin_code:
+        codes.append({"code": spool.gtin_code, "kind": "gtin", "is_refill": spool.bought_as_refill})
+    for value in (spool.sku_code, spool.asin_code, spool.other_code):
+        if value:
+            codes.append({"code": value, "kind": "sku", "is_refill": spool.bought_as_refill})
+    return codes
+
+
 async def external_all_codes(code: str, kind: str, settings: dict[str, str]) -> tuple[dict, str, list[dict]] | None:
     """Cross-reference OFD and SpoolmanDB-Community for `code`, merging both hits.
 
@@ -80,6 +97,8 @@ async def external_all_codes(code: str, kind: str, settings: dict[str, str]) -> 
     if not barcode_lookup_enabled(settings):
         return None
 
+    lookup_kind = "gtin" if kind == "gtin" else "sku"  # the DBs file ASINs under their SKU fields
+
     async def _ofd_lookup(c: str, k: str) -> tuple[dict, list[dict]] | None:
         return await (ofd_client.lookup(c) if k == "gtin" else ofd_client.lookup_article(c))
 
@@ -89,12 +108,12 @@ async def external_all_codes(code: str, kind: str, settings: dict[str, str]) -> 
         )
 
     try:
-        ofd_hit = await _ofd_lookup(code, kind)
+        ofd_hit = await _ofd_lookup(code, lookup_kind)
     except Exception:
         logger.warning("OFD lookup failed for %s", code, exc_info=True)
         ofd_hit = None
     try:
-        smdb_hit = await _smdb_lookup(code, kind)
+        smdb_hit = await _smdb_lookup(code, lookup_kind)
     except Exception:
         logger.warning("SpoolmanDB-Community lookup failed for %s", code, exc_info=True)
         smdb_hit = None
@@ -163,19 +182,18 @@ async def resolve_barcode(
     two external databases along the way.
 
     When Spoolman mode is active (caller passes its client), "the user's own
-    inventory" means Spoolman's spools (barcode stored under
-    extra.bambu_barcode — see SpoolmanClient.find_spool_by_barcode) since
-    that's where the visible inventory actually lives; otherwise it means the
-    local ``Spool``/``SpoolCode`` tables. Falls back to OFD, then
-    SpoolmanDB-Community, if barcode_lookup_enabled — OFD stays first since
-    it's purpose-built for barcode lookups; SpoolmanDB-Community's coverage
-    is far sparser in barcodes but broader in brands, so it's a secondary
-    fallback, not a replacement.
+    inventory" means Spoolman's spools (codes stored under extras — see
+    SpoolmanClient.find_spool_by_barcode) since that's where the visible
+    inventory actually lives; otherwise it means the local ``Spool`` table's
+    typed code columns. Falls back to OFD, then SpoolmanDB-Community, if
+    barcode_lookup_enabled — OFD stays first since it's purpose-built for
+    barcode lookups; SpoolmanDB-Community's coverage is far sparser in
+    barcodes but broader in brands, so it's a secondary fallback, not a
+    replacement.
 
     Returns (fields, source, all_codes). ``source`` is "inventory", "ofd",
-    "spoolmandb-community", or None (no match). ``all_codes`` is every code
-    (GTIN or SKU) discovered alongside `code` — siblings to persist/display
-    (own-inventory hits include every code already stored on that spool).
+    "spoolmandb-community", or None (no match). An inventory hit's
+    ``all_codes`` are the matched spool's own stored codes.
     """
     if spoolman_client:
         try:
@@ -195,21 +213,28 @@ async def resolve_barcode(
             fields = {key: mapped.get(key) for key in BARCODE_FIELD_KEYS}
             return fields, "inventory", mapped.get("linked_codes") or []
     else:
-        # Match on `code` alone, not `kind` — a canonical code string
-        # identifies one product regardless of how it was classified at
-        # write time (`kind` is only used to route external-DB lookups and
-        # as row metadata).
+        # Match on the code string across ALL typed columns — whichever column
+        # it lives in, the same physical string identifies the same package.
+        # Newest roll wins so the freshest user edits become the template.
+        # other_code compares case-insensitively: it stores the user's casing
+        # verbatim, while the scanned side arrives canonicalized (uppercased).
         result = await db.execute(
-            select(SpoolCode).where(SpoolCode.code == code).order_by(SpoolCode.created_at.desc()).limit(1)
+            select(Spool)
+            .where(
+                or_(
+                    Spool.gtin_code == code,
+                    Spool.sku_code == code,
+                    Spool.asin_code == code,
+                    func.upper(Spool.other_code) == code,
+                )
+            )
+            .order_by(Spool.created_at.desc())
+            .limit(1)
         )
-        hit = result.scalars().first()
-        if hit:
-            spool_result = await db.execute(select(Spool).where(Spool.id == hit.spool_id))
-            existing = spool_result.scalars().first()
-            if existing:
-                fields = {key: getattr(existing, key) for key in BARCODE_FIELD_KEYS}
-                all_codes = [{"code": c.code, "kind": c.kind, "is_refill": c.is_refill} for c in existing.codes]
-                return fields, "inventory", all_codes
+        existing = result.scalars().first()
+        if existing:
+            fields = {key: getattr(existing, key) for key in BARCODE_FIELD_KEYS}
+            return fields, "inventory", codes_for_spool(existing)
 
     external = await external_all_codes(code, kind, settings)
     if external is None:
@@ -217,80 +242,120 @@ async def resolve_barcode(
     return external
 
 
-async def persist_spool_codes(
-    db: AsyncSession,
-    spool_id: int,
-    primary_code: str,
-    primary_kind: str,
-    all_codes: list[dict],
-    primary_is_refill: bool = False,
-) -> None:
-    """Store `primary_code` plus every sibling in `all_codes` against `spool_id`,
-    deduped on (spool_id, code). The scanned/typed code is always `is_primary`.
+def _is_asin_shaped(code: str | None) -> bool:
+    if not code:
+        return False
+    return classify_code(code)[1] == "asin"
 
-    `primary_is_refill` records whether the primary code is the no-spool refill
-    variant — the databases mark this via eans_refill/spool_refill, but a
-    user-linked/manually-typed code has no such signal, so the caller supplies
-    it (e.g. the SpoolBuddy refill toggle)."""
-    existing_result = await db.execute(select(SpoolCode.code).where(SpoolCode.spool_id == spool_id))
-    existing_codes = {row[0] for row in existing_result.all()}
 
-    to_insert: dict[str, dict] = {
-        primary_code: {"kind": primary_kind, "is_refill": primary_is_refill, "is_primary": True}
-    }
-    for entry in all_codes:
-        code_val = entry.get("code")
-        if not code_val or code_val == primary_code:
+def _pick_same_package_gtin(codes: list[dict], bought_as_refill: bool) -> str | None:
+    """Choose a GTIN from a same-package code set, preferring the one whose
+    refill flag matches how this roll was bought (a SpoolmanDB variant lists
+    the with-spool EAN and the refill EAN side by side)."""
+    gtins = [c for c in codes if c.get("kind") == "gtin" and c.get("code")]
+    for c in gtins:
+        if bool(c.get("is_refill")) == bought_as_refill:
+            return c["code"]
+    return gtins[0]["code"] if gtins else None
+
+
+def _pick_same_package_sku(codes: list[dict], scanned: str, want_asin: bool) -> str | None:
+    for c in codes:
+        value = c.get("code") or ""
+        if not value or value == scanned or c.get("kind") == "gtin":
             continue
-        to_insert.setdefault(
-            code_val,
-            {"kind": entry.get("kind") or "gtin", "is_refill": bool(entry.get("is_refill")), "is_primary": False},
-        )
-
-    for code_val, meta in to_insert.items():
-        if code_val in existing_codes:
-            continue
-        db.add(SpoolCode(spool_id=spool_id, code=code_val, **meta))
-    await db.commit()
+        if _is_asin_shaped(value) == want_asin:
+            return value
+    return None
 
 
-async def resolve_codes_for_barcode(barcode: str, settings: dict[str, str]) -> tuple[str, str, list[dict]]:
-    """Classify `barcode` and cross-reference it externally, returning
-    `(canonical_code, kind, sibling_codes)`. Swallows lookup failures — a spool
-    still gets created/imported with just its primary code if the external
-    databases are unreachable. `external_all_codes` reads the 24h-cached
-    in-memory index, not the network, so batch callers should resolve once per
-    unique barcode rather than once per row/spool, but a repeat call for the
-    same barcode is cheap either way."""
-    code, kind = classify_code(barcode)
-    try:
-        external = await external_all_codes(code, kind, settings)
-    except Exception:
-        logger.warning("Cross-reference lookup failed while resolving codes for barcode %s", barcode, exc_info=True)
-        external = None
-    all_codes = external[2] if external else []
-    return code, kind, all_codes
-
-
-async def persist_barcode_codes_for_spool(
-    db: AsyncSession,
-    spool_id: int,
-    barcode: str | None,
+async def route_scanned_code(
+    scanned: str | None,
     settings: dict[str, str],
-    primary_is_refill: bool = False,
-) -> None:
-    """Replace every SpoolCode row for `spool_id` with the set cross-referenced
-    from `barcode` — or with nothing, if `barcode` is unset. Delete-then-insert
-    (mirrors Spoolman mode's reset-then-set of bambu_linked_codes in
-    _resolve_linked_codes_json) instead of only ever inserting: without this,
-    editing a barcode A -> B left A's rows in place alongside B's, so both
-    still resolved on scan, and clearing a barcode entirely left every
-    previously-discovered sibling code still matching. Safe to call
-    unconditionally on create/bulk-create too — a fresh spool has no rows to
-    delete."""
-    await db.execute(delete(SpoolCode).where(SpoolCode.spool_id == spool_id))
-    if not barcode:
-        await db.commit()
-        return
-    code, kind, all_codes = await resolve_codes_for_barcode(barcode, settings)
-    await persist_spool_codes(db, spool_id, code, kind, all_codes, primary_is_refill=primary_is_refill)
+    bought_as_refill: bool = False,
+) -> dict[str, str | None]:
+    """Route a raw scanned code into the typed spool columns.
+
+    Classification ladder: GTIN (structural checksum) → ASIN (B0-shape) →
+    SKU *candidate*, promoted to ``sku_code`` only when a community database
+    actually knows it — otherwise it lands in ``other_code`` verbatim
+    (trimmed, case preserved: that column is the user's own code space).
+
+    Sibling columns cross-fill under the size-consistency rule: OFD supplies
+    the code printed on the SAME size row (its gtin↔article pairing);
+    SpoolmanDB variants are per-package already, with the with-spool vs
+    refill EAN chosen by ``bought_as_refill``. When neither database can
+    prove same-package, the sibling column stays None — never guess a
+    different package's code onto this roll.
+
+    Returns a dict with the four ``*_code`` keys (values or None). Callers
+    merge it under any explicitly-supplied columns (explicit always wins).
+    """
+    routed: dict[str, str | None] = {
+        "gtin_code": None,
+        "asin_code": None,
+        "sku_code": None,
+        "other_code": None,
+    }
+    if not scanned or not scanned.strip():
+        return routed
+    canonical, kind = classify_code(scanned)
+    if not canonical:
+        return routed
+
+    lookup_kind = "gtin" if kind == "gtin" else "sku"
+
+    ofd_known = False
+    ofd_paired: str | None = None
+    smdb_codes: list[dict] = []
+    smdb_known = False
+    if barcode_lookup_enabled(settings):
+        try:
+            ofd_known, ofd_paired = await ofd_client.same_package_code(canonical, lookup_kind)
+        except Exception:
+            logger.warning("OFD same-package lookup failed for %s", canonical, exc_info=True)
+        try:
+            smdb_hit = await (
+                spoolmandb_community_client.lookup(canonical)
+                if lookup_kind == "gtin"
+                else spoolmandb_community_client.lookup_sku(canonical)
+            )
+        except Exception:
+            logger.warning("SpoolmanDB-Community lookup failed for %s", canonical, exc_info=True)
+            smdb_hit = None
+        if smdb_hit:
+            smdb_known = True
+            smdb_codes = smdb_hit[1] or []
+
+    def _fill_from_paired_or_smdb(*, want_gtin: bool, want_asin: bool) -> None:
+        if want_gtin and routed["gtin_code"] is None:
+            if ofd_paired and classify_code(ofd_paired)[1] == "gtin":
+                routed["gtin_code"] = ofd_paired
+            else:
+                routed["gtin_code"] = _pick_same_package_gtin(smdb_codes, bought_as_refill)
+        if routed["sku_code"] is None:
+            if ofd_paired and classify_code(ofd_paired)[1] == "sku":
+                routed["sku_code"] = ofd_paired
+            else:
+                routed["sku_code"] = _pick_same_package_sku(smdb_codes, canonical, want_asin=False)
+        if want_asin and routed["asin_code"] is None:
+            if ofd_paired and _is_asin_shaped(ofd_paired):
+                routed["asin_code"] = ofd_paired
+            else:
+                routed["asin_code"] = _pick_same_package_sku(smdb_codes, canonical, want_asin=True)
+
+    if kind == "gtin":
+        routed["gtin_code"] = canonical
+        _fill_from_paired_or_smdb(want_gtin=False, want_asin=True)
+    elif kind == "asin":
+        routed["asin_code"] = canonical
+        _fill_from_paired_or_smdb(want_gtin=True, want_asin=False)
+    else:
+        if ofd_known or smdb_known:
+            routed["sku_code"] = canonical
+            _fill_from_paired_or_smdb(want_gtin=True, want_asin=True)
+        else:
+            # Unknown everywhere: the user's own code space, stored verbatim
+            # (trimmed). Still matched on future scans via the inventory rung.
+            routed["other_code"] = scanned.strip()
+    return routed

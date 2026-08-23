@@ -1,10 +1,9 @@
-"""Integration tests for barcode persistence on the Spoolman inventory proxy.
+"""Integration tests for typed-code persistence on the Spoolman inventory proxy.
 
-Spoolman has no native barcode field, so create/update own the round-trip via
-the spool's extra dict: the scanned/typed code under bambu_barcode, the
-cross-referenced sibling bundle under bambu_linked_codes, and the refill
-toggle under bambu_barcode_is_refill (all JSON-encoded, same pattern as
-bambu_slicer_filament / bambu_color_name). The SpoolmanClient is mocked —
+Spoolman has no native code fields, so create/update own the round-trip via
+the spool's extra dict: bambu_gtin_code / bambu_asin_code / bambu_sku_code /
+bambu_other_code plus bambu_bought_as_refill (all JSON-encoded, same pattern
+as bambu_slicer_filament / bambu_color_name). The SpoolmanClient is mocked —
 these tests pin what the routes write, not Spoolman itself; the external
 OFD/SpoolmanDB-Community lookups are patched so nothing touches the network.
 """
@@ -110,164 +109,152 @@ def _merged_extra(mock_client) -> dict:
     return mock_client.merge_spool_extra.call_args.args[1]
 
 
-class TestCreateWritesBarcodeExtras:
-    async def test_create_writes_barcode_linked_codes_and_refill_flag(
+class TestCreateWritesTypedCodeExtras:
+    async def test_scanned_gtin_routes_and_cross_fills_sku(
         self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
     ):
-        """A create with a barcode registers all three extra fields and writes
-        the scanned code, the cross-referenced sibling bundle, and the refill
-        toggle to spool.extra."""
-        ofd_hit = (
+        """A create with scanned_code routes it down the ladder into the typed
+        extras and cross-fills the same-package SKU from the community DBs."""
+        smdb_hit = (
             {"material": "PLA"},
             [
                 {"code": "6938936716785", "kind": "gtin", "is_refill": False},
-                {"code": "ALZMNTABS01", "kind": "sku", "is_refill": False},
+                {"code": "17600", "kind": "sku", "is_refill": False},
             ],
         )
         payload = {
             "material": "PLA",
             "label_weight": 1000,
             "weight_used": 0,
-            "barcode": "6938936716785",
-            "barcode_is_refill": True,
+            "scanned_code": "6938936716785",
+            "bought_as_refill": True,
         }
-        p1, p2, p3, p4 = _patch_external(ofd_result=ofd_hit)
-        with p1, p2, p3, p4:
+        with (
+            patch("backend.app.services.ofd_client.same_package_code", new=AsyncMock(return_value=(False, None))),
+            patch("backend.app.services.spoolmandb_community_client.lookup", new=AsyncMock(return_value=smdb_hit)),
+            patch("backend.app.services.spoolmandb_community_client.lookup_sku", new=AsyncMock(return_value=None)),
+        ):
             response = await async_client.post("/api/v1/spoolman/inventory/spools", json=payload)
 
         assert response.status_code == 200
-        for field in ("bambu_barcode", "bambu_linked_codes", "bambu_barcode_is_refill"):
+        for field in ("bambu_gtin_code", "bambu_sku_code", "bambu_bought_as_refill"):
             mock_spoolman_client.ensure_extra_field.assert_any_call(field)
         extra_patch = _merged_extra(mock_spoolman_client)
-        assert json.loads(extra_patch["bambu_barcode"]) == "6938936716785"
-        assert json.loads(extra_patch["bambu_barcode_is_refill"]) is True
-        assert json.loads(extra_patch["bambu_linked_codes"]) == [
-            {"code": "6938936716785", "kind": "gtin", "is_refill": False},
-            {"code": "ALZMNTABS01", "kind": "sku", "is_refill": False},
-        ]
-
-    async def test_create_without_external_hit_writes_barcode_and_default_refill(
-        self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
-    ):
-        payload = {"material": "PLA", "label_weight": 1000, "weight_used": 0, "barcode": "6938936716785"}
-        p1, p2, p3, p4 = _patch_external()
-        with p1, p2, p3, p4:
-            response = await async_client.post("/api/v1/spoolman/inventory/spools", json=payload)
-
-        assert response.status_code == 200
-        extra_patch = _merged_extra(mock_spoolman_client)
-        assert json.loads(extra_patch["bambu_barcode"]) == "6938936716785"
-        assert json.loads(extra_patch["bambu_barcode_is_refill"]) is False
-        # No cross-reference hit → no linked-codes entry at all on create.
+        assert json.loads(extra_patch["bambu_gtin_code"]) == "6938936716785"
+        assert json.loads(extra_patch["bambu_sku_code"]) == "17600"
+        assert json.loads(extra_patch["bambu_bought_as_refill"]) is True
         assert "bambu_linked_codes" not in extra_patch
 
-    async def test_create_canonicalizes_leading_zero_barcode(
+    async def test_explicit_typed_fields_write_directly(
         self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
     ):
-        """Spoolman-mode create must canonicalize exactly like the local-DB
-        SpoolCreate: lookups always search the zero-stripped form, so storing
-        a raw leading-zero EAN-13 in extra.bambu_barcode would make a repeat
-        scan of this spool's own barcode never match it."""
-        payload = {"material": "PLA", "label_weight": 1000, "weight_used": 0, "barcode": "06938936716785"}
+        payload = {
+            "material": "PLA",
+            "label_weight": 1000,
+            "weight_used": 0,
+            "gtin_code": "06938936716785",  # canonicalizes like local mode
+            "sku_code": "17600",
+        }
         p1, p2, p3, p4 = _patch_external()
         with p1, p2, p3, p4:
             response = await async_client.post("/api/v1/spoolman/inventory/spools", json=payload)
 
         assert response.status_code == 200
         extra_patch = _merged_extra(mock_spoolman_client)
-        assert json.loads(extra_patch["bambu_barcode"]) == "6938936716785"
+        assert json.loads(extra_patch["bambu_gtin_code"]) == "6938936716785"
+        assert json.loads(extra_patch["bambu_sku_code"]) == "17600"
+        assert json.loads(extra_patch["bambu_bought_as_refill"]) is False
 
-    async def test_create_with_lookup_disabled_still_writes_barcode_without_external_calls(
+    async def test_unknown_scanned_code_lands_in_other_code(
+        self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
+    ):
+        payload = {"material": "PLA", "label_weight": 1000, "weight_used": 0, "scanned_code": "MyShelf-a42"}
+        with (
+            patch("backend.app.services.ofd_client.same_package_code", new=AsyncMock(return_value=(False, None))),
+            patch("backend.app.services.spoolmandb_community_client.lookup", new=AsyncMock(return_value=None)),
+            patch("backend.app.services.spoolmandb_community_client.lookup_sku", new=AsyncMock(return_value=None)),
+        ):
+            response = await async_client.post("/api/v1/spoolman/inventory/spools", json=payload)
+
+        assert response.status_code == 200
+        extra_patch = _merged_extra(mock_spoolman_client)
+        assert json.loads(extra_patch["bambu_other_code"]) == "MyShelf-a42"
+        assert "bambu_gtin_code" not in extra_patch
+
+    async def test_create_with_lookup_disabled_writes_structural_routing_only(
         self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client, db_session
     ):
         """The barcode_lookup_enabled toggle gates Spoolman-mode writes too —
-        saving must not download anything, but the scanned code still lands in
-        extra.bambu_barcode."""
+        saving must not download anything; a scanned GTIN still lands
+        structurally in bambu_gtin_code with no cross-fill."""
         from backend.app.models.settings import Settings
 
         db_session.add(Settings(key="barcode_lookup_enabled", value="false"))
         await db_session.commit()
 
-        payload = {"material": "PLA", "label_weight": 1000, "weight_used": 0, "barcode": "6938936716785"}
-        p1, p2, p3, p4 = _forbid_external()
-        with p1, p2, p3, p4:
+        payload = {"material": "PLA", "label_weight": 1000, "weight_used": 0, "scanned_code": "6938936716785"}
+        boom = AssertionError("external barcode lookup must not be called")
+        with (
+            patch("backend.app.services.ofd_client.same_package_code", new=AsyncMock(side_effect=boom)),
+            patch("backend.app.services.spoolmandb_community_client.lookup", new=AsyncMock(side_effect=boom)),
+            patch("backend.app.services.spoolmandb_community_client.lookup_sku", new=AsyncMock(side_effect=boom)),
+        ):
             response = await async_client.post("/api/v1/spoolman/inventory/spools", json=payload)
 
         assert response.status_code == 200
         extra_patch = _merged_extra(mock_spoolman_client)
-        assert json.loads(extra_patch["bambu_barcode"]) == "6938936716785"
-        assert "bambu_linked_codes" not in extra_patch
+        assert json.loads(extra_patch["bambu_gtin_code"]) == "6938936716785"
+        assert "bambu_sku_code" not in extra_patch
 
 
-class TestUpdateResetsThenSetsBarcodeExtras:
-    async def test_barcode_change_replaces_linked_codes_and_clears_refill_flag(
+class TestUpdateWritesTypedCodeExtras:
+    async def test_update_writes_only_set_fields(
         self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
     ):
-        """Reset-then-set: a barcode change must replace the linked-code bundle
-        with the NEW barcode's cross-reference and clear the refill flag (the
-        edit form has no refill toggle) — never leave the previous barcode's
-        stale values behind. Mirrors persist_barcode_codes_for_spool's
-        delete-then-insert in local mode."""
-        ofd_hit_b = ({"material": "PETG"}, [{"code": "12345678905", "kind": "gtin", "is_refill": False}])
-        p1, p2, p3, p4 = _patch_external(ofd_result=ofd_hit_b)
-        with p1, p2, p3, p4:
-            response = await async_client.patch("/api/v1/spoolman/inventory/spools/42", json={"barcode": "12345678905"})
-
-        assert response.status_code == 200
-        for field in ("bambu_barcode", "bambu_linked_codes", "bambu_barcode_is_refill"):
-            mock_spoolman_client.ensure_extra_field.assert_any_call(field)
-        extra_patch = _merged_extra(mock_spoolman_client)
-        assert json.loads(extra_patch["bambu_barcode"]) == "12345678905"
-        assert json.loads(extra_patch["bambu_barcode_is_refill"]) is False
-        assert json.loads(extra_patch["bambu_linked_codes"]) == [
-            {"code": "12345678905", "kind": "gtin", "is_refill": False}
-        ]
-
-    async def test_barcode_change_without_external_hit_writes_empty_linked_codes(
-        self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
-    ):
-        """Unlike create (which just omits the key), update always writes
-        bambu_linked_codes — an empty list when nothing cross-references — so a
-        previous barcode's bundle can never survive the change."""
-        p1, p2, p3, p4 = _patch_external()
-        with p1, p2, p3, p4:
-            response = await async_client.patch("/api/v1/spoolman/inventory/spools/42", json={"barcode": "12345678905"})
-
-        assert response.status_code == 200
-        extra_patch = _merged_extra(mock_spoolman_client)
-        assert json.loads(extra_patch["bambu_barcode"]) == "12345678905"
-        assert json.loads(extra_patch["bambu_linked_codes"]) == []
-
-    async def test_clearing_barcode_writes_empty_values_without_external_calls(
-        self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
-    ):
-        """An explicit empty-string barcode clears all three stored values, and
-        clearing must not trigger any cross-reference lookup."""
+        payload = {"sku_code": "17600"}
         p1, p2, p3, p4 = _forbid_external()
         with p1, p2, p3, p4:
-            response = await async_client.patch("/api/v1/spoolman/inventory/spools/42", json={"barcode": ""})
+            response = await async_client.patch("/api/v1/spoolman/inventory/spools/42", json=payload)
 
         assert response.status_code == 200
         extra_patch = _merged_extra(mock_spoolman_client)
-        assert json.loads(extra_patch["bambu_barcode"]) == ""
-        assert json.loads(extra_patch["bambu_linked_codes"]) == []
-        assert json.loads(extra_patch["bambu_barcode_is_refill"]) is False
+        assert json.loads(extra_patch["bambu_sku_code"]) == "17600"
+        assert "bambu_gtin_code" not in extra_patch
+        assert "bambu_bought_as_refill" not in extra_patch
 
-    async def test_omitting_barcode_skips_barcode_extra_write(
+    async def test_update_clears_with_empty_string(
         self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
     ):
-        """When barcode is absent from the PATCH body, the route must not touch
-        the barcode extra fields at all (preserves any existing scanned value)."""
+        payload = {"gtin_code": ""}
         p1, p2, p3, p4 = _forbid_external()
         with p1, p2, p3, p4:
-            response = await async_client.patch(
-                "/api/v1/spoolman/inventory/spools/42", json={"note": "no barcode here"}
-            )
+            response = await async_client.patch("/api/v1/spoolman/inventory/spools/42", json=payload)
 
         assert response.status_code == 200
-        barcode_calls = [
-            c
-            for c in mock_spoolman_client.ensure_extra_field.call_args_list
-            if c.args and c.args[0] in ("bambu_barcode", "bambu_linked_codes", "bambu_barcode_is_refill")
-        ]
-        assert barcode_calls == []
+        extra_patch = _merged_extra(mock_spoolman_client)
+        assert json.loads(extra_patch["bambu_gtin_code"]) == ""
+
+    async def test_update_bought_as_refill_flag(
+        self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
+    ):
+        payload = {"bought_as_refill": True}
+        p1, p2, p3, p4 = _forbid_external()
+        with p1, p2, p3, p4:
+            response = await async_client.patch("/api/v1/spoolman/inventory/spools/42", json=payload)
+
+        assert response.status_code == 200
+        extra_patch = _merged_extra(mock_spoolman_client)
+        assert json.loads(extra_patch["bambu_bought_as_refill"]) is True
+
+    async def test_omitting_code_fields_skips_code_extra_write(
+        self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
+    ):
+        payload = {"note": "just a note"}
+        p1, p2, p3, p4 = _forbid_external()
+        with p1, p2, p3, p4:
+            response = await async_client.patch("/api/v1/spoolman/inventory/spools/42", json=payload)
+
+        assert response.status_code == 200
+        for call in mock_spoolman_client.merge_spool_extra.call_args_list:
+            merged = call.args[1]
+            assert not any(k.startswith("bambu_") and "code" in k for k in merged)

@@ -5,7 +5,7 @@ the cached community databases (OFD, SpoolmanDB-Community). These tests pin:
   - local inventory matches (token AND-match over brand/material/subtype/color)
   - source ranking: inventory before OFD before SpoolmanDB-Community
   - external sources gated off when barcode_lookup_enabled is false
-  - OFD variant de-duplication
+  - OFD rows are per purchasable package (one row per size entry)
   - each row carries its sibling `codes` for linking
 """
 
@@ -29,6 +29,11 @@ def _spool(**over):
         "nozzle_temp_min": 190,
         "nozzle_temp_max": 230,
         "archived_at": None,
+        "gtin_code": None,
+        "asin_code": None,
+        "sku_code": None,
+        "other_code": None,
+        "bought_as_refill": False,
     }
     defaults.update(over)
     for k, v in defaults.items():
@@ -60,10 +65,11 @@ def _db(local_spools=(), settings_rows=()):
     return db
 
 
-def _patch_external(gtin_index=None, filaments=None):
+def _patch_external(gtin_index=None, filaments=None, article_index=None):
     return patch.multiple(
         "backend.app.services.ofd_client",
         get_gtin_index=AsyncMock(return_value=gtin_index or {}),
+        get_article_index=AsyncMock(return_value=article_index or {}),
         codes_for_variant=AsyncMock(return_value=[]),
     ), patch.multiple(
         "backend.app.services.spoolmandb_community_client",
@@ -135,16 +141,33 @@ class TestCatalogSearch:
         assert rows == []
 
     @pytest.mark.asyncio
-    async def test_ofd_variant_dedup(self):
+    async def test_ofd_rows_are_per_package(self):
+        """Two GTINs sharing one variant are two PACKAGES (e.g. 1 kg and
+        3 kg of the same color) — each gets its own row with its own
+        label_weight and only its own same-size code pair. The old
+        per-variant dedup merged them into one size-ambiguous row."""
         db = _db(local_spools=[])
-        # Two GTINs share variant_id "v1" — only one row should result.
         gtin_index = {
-            "111": {"fields": {"material": "PLA", "brand": "Polymaker", "color_name": "Charcoal"}, "variant_id": "v1"},
-            "222": {"fields": {"material": "PLA", "brand": "Polymaker", "color_name": "Charcoal"}, "variant_id": "v1"},
+            "111": {
+                "fields": {"material": "PLA", "brand": "Polymaker", "color_name": "Charcoal", "label_weight": 1000},
+                "variant_id": "v1",
+                "paired": "SKU-1KG",
+                "is_refill": False,
+            },
+            "222": {
+                "fields": {"material": "PLA", "brand": "Polymaker", "color_name": "Charcoal", "label_weight": 3000},
+                "variant_id": "v1",
+                "paired": None,
+                "is_refill": True,
+            },
         }
         p1, p2 = _patch_external(gtin_index=gtin_index)
         with p1, p2:
             rows = await barcode_catalog_search(q="polymaker charcoal", limit=25, db=db, _=None)
 
         ofd_rows = [r for r in rows if r.source == "ofd"]
-        assert len(ofd_rows) == 1
+        assert len(ofd_rows) == 2
+        by_weight = {r.label_weight: r for r in ofd_rows}
+        assert {c.code for c in by_weight[1000].codes} == {"111", "SKU-1KG"}
+        assert {c.code for c in by_weight[3000].codes} == {"222"}
+        assert by_weight[3000].codes[0].is_refill is True

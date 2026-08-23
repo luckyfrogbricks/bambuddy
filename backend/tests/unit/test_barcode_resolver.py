@@ -1,16 +1,21 @@
-"""Unit tests for the shared barcode resolution + persistence service.
+"""Unit tests for services/barcode_resolver.py — the shared resolution +
+code-routing engine.
 
-`backend/app/services/barcode_resolver.py` is the one engine every barcode
-path shares: `external_all_codes` is THE gate for external (OFD /
-SpoolmanDB-Community) lookups, `resolve_barcode` is the own-inventory-first
-resolution chain, and `persist_spool_codes` / `persist_barcode_codes_for_spool`
-are the one funnel that stores the scanned/typed code (`is_primary=True`) plus
-every cross-referenced sibling as `SpoolCode` rows, deduped on
-(spool_id, code).
+Covers, in order:
+- the barcode_lookup_enabled gate,
+- external_all_codes: routing by kind (ASINs file under the DBs' SKU fields),
+  field merging/priority, sibling cross-probing, failure degradation, and the
+  hard toggle-off guarantee (no external activity at all),
+- resolve_barcode: own-inventory-first via the typed code columns (any
+  column matches, newest roll donates the template), Spoolman-mode routing,
+  external fallback,
+- route_scanned_code: the classification ladder + size-consistent cross-fill
+  (OFD same-size pairing, SpoolmanDB per-package variants, unknown codes
+  landing verbatim in other_code),
+- codes_for_spool: the typed columns rendered as lookup/display code dicts.
 
-Persistence tests run against a real SQLite engine (not a MagicMock DB) so the
-actual SQL — including the delete-then-insert replacement semantics and the
-(spool_id, code) dedupe — is what's exercised.
+DB-touching tests run against a real in-memory SQLite engine — PR #1895's
+review specifically flagged MagicMock-DB tests as exercising no SQL at all.
 """
 
 from __future__ import annotations
@@ -20,19 +25,15 @@ from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import selectinload
 
 from backend.app.models.spool import Spool
-from backend.app.models.spool_code import SpoolCode
 from backend.app.services.barcode_resolver import (
     barcode_lookup_enabled,
+    codes_for_spool,
     external_all_codes,
-    persist_barcode_codes_for_spool,
-    persist_spool_codes,
     resolve_barcode,
-    resolve_codes_for_barcode,
+    route_scanned_code,
 )
 
 ENABLED: dict[str, str] = {}  # missing key defaults to enabled
@@ -44,7 +45,6 @@ async def engine():
     eng = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with eng.begin() as conn:
         await conn.run_sync(Spool.__table__.create)
-        await conn.run_sync(SpoolCode.__table__.create)
     yield eng
     await eng.dispose()
 
@@ -57,15 +57,11 @@ async def _insert_spool(session: AsyncSession, spool_id: int, **overrides) -> No
         "weight_used": 0,
         "weight_used_baseline": 0,
         "weight_locked": False,
+        "bought_as_refill": False,
     }
     fields.update(overrides)
     session.add(Spool(id=spool_id, **fields))
     await session.commit()
-
-
-async def _codes_for(session: AsyncSession, spool_id: int) -> list[SpoolCode]:
-    result = await session.execute(select(SpoolCode).where(SpoolCode.spool_id == spool_id))
-    return list(result.scalars().all())
 
 
 @contextmanager
@@ -78,6 +74,7 @@ def _forbid_external():
         for target in (
             "backend.app.services.ofd_client.lookup",
             "backend.app.services.ofd_client.lookup_article",
+            "backend.app.services.ofd_client.same_package_code",
             "backend.app.services.spoolmandb_community_client.lookup",
             "backend.app.services.spoolmandb_community_client.lookup_sku",
         ):
@@ -86,12 +83,13 @@ def _forbid_external():
 
 
 @contextmanager
-def _patch_external(ofd=None, ofd_article=None, smdb=None, smdb_sku=None):
+def _patch_external(ofd=None, ofd_article=None, smdb=None, smdb_sku=None, ofd_paired=(False, None)):
     with ExitStack() as stack:
         mocks = {}
         for name, target, value in (
             ("ofd", "backend.app.services.ofd_client.lookup", ofd),
             ("ofd_article", "backend.app.services.ofd_client.lookup_article", ofd_article),
+            ("ofd_paired", "backend.app.services.ofd_client.same_package_code", ofd_paired),
             ("smdb", "backend.app.services.spoolmandb_community_client.lookup", smdb),
             ("smdb_sku", "backend.app.services.spoolmandb_community_client.lookup_sku", smdb_sku),
         ):
@@ -134,6 +132,16 @@ class TestExternalAllCodes:
             assert await external_all_codes("ALZMNTABS01", "sku", ENABLED) is None
         mocks["ofd_article"].assert_awaited_once_with("ALZMNTABS01")
         mocks["smdb_sku"].assert_awaited_once_with("ALZMNTABS01")
+        mocks["ofd"].assert_not_called()
+        mocks["smdb"].assert_not_called()
+
+    async def test_asin_kind_routes_to_sku_lookups(self):
+        """Both community DBs file ASINs under their SKU/article fields, so an
+        asin-classified code must take the SKU lookup path."""
+        with _patch_external() as mocks:
+            assert await external_all_codes("B0CJLR62MF", "asin", ENABLED) is None
+        mocks["ofd_article"].assert_awaited_once_with("B0CJLR62MF")
+        mocks["smdb_sku"].assert_awaited_once_with("B0CJLR62MF")
         mocks["ofd"].assert_not_called()
         mocks["smdb"].assert_not_called()
 
@@ -226,16 +234,42 @@ class TestExternalAllCodes:
             assert await external_all_codes("111111111117", "gtin", ENABLED) is None
 
 
+class TestCodesForSpool:
+    def test_all_columns_render_with_shared_refill_flag(self):
+        spool = Spool(
+            material="PLA",
+            gtin_code="6938936716785",
+            sku_code="17600",
+            asin_code="B0CJLR62MF",
+            other_code="MyShelf-a42",
+            bought_as_refill=True,
+        )
+        codes = codes_for_spool(spool)
+        by_code = {c["code"]: c for c in codes}
+        assert set(by_code) == {"6938936716785", "17600", "B0CJLR62MF", "MyShelf-a42"}
+        assert by_code["6938936716785"]["kind"] == "gtin"
+        assert by_code["17600"]["kind"] == "sku"
+        assert all(c["is_refill"] is True for c in codes)
+
+    def test_empty_columns_render_nothing(self):
+        assert codes_for_spool(Spool(material="PLA")) == []
+
+
 class TestResolveBarcode:
-    async def test_own_inventory_hit_skips_external_and_returns_all_codes(self, engine):
-        """A code already stored as a SpoolCode row resolves from the local
-        tables with zero external calls, returning the owning spool's fields
-        and every code stored on that spool."""
+    async def test_own_inventory_hit_skips_external_and_returns_stored_codes(self, engine):
+        """A code stored in ANY typed column resolves from the local table with
+        zero external calls, returning the owning roll's fields and its full
+        stored code set."""
         async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1, material="ASA", brand="Polymaker")
-            session.add(SpoolCode(spool_id=1, code="6938936716785", kind="gtin", is_primary=True))
-            session.add(SpoolCode(spool_id=1, code="ALZMNTABS01", kind="sku", is_refill=True))
-            await session.commit()
+            await _insert_spool(
+                session,
+                1,
+                material="ASA",
+                brand="Polymaker",
+                gtin_code="6938936716785",
+                sku_code="ALZMNTABS01",
+                bought_as_refill=True,
+            )
 
             with _forbid_external():
                 fields, source, all_codes = await resolve_barcode(session, "6938936716785", "gtin", ENABLED)
@@ -247,24 +281,37 @@ class TestResolveBarcode:
         assert set(by_code) == {"6938936716785", "ALZMNTABS01"}
         assert by_code["ALZMNTABS01"]["is_refill"] is True
 
-    async def test_most_recent_code_row_wins_when_two_spools_share_a_code(self, engine):
-        """The (spool_id, code) unique constraint still allows the same code on
-        several spools — resolution picks the most recently registered row,
-        matching SpoolmanClient.find_spool_by_barcode's tie-break."""
+    async def test_sku_column_matches_too(self, engine):
+        """Scanning the article code printed on the box matches a roll stored
+        by its SKU column — the requirement behind searchable sku_code."""
         async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1, brand="Old")
-            await _insert_spool(session, 2, brand="New")
-            session.add(
-                SpoolCode(
-                    spool_id=1, code="6938936716785", kind="gtin", is_primary=True, created_at=datetime(2024, 1, 1)
-                )
-            )
-            session.add(
-                SpoolCode(
-                    spool_id=2, code="6938936716785", kind="gtin", is_primary=True, created_at=datetime(2024, 6, 1)
-                )
-            )
-            await session.commit()
+            await _insert_spool(session, 1, brand="Bambu Lab", sku_code="17600")
+            with _forbid_external():
+                fields, source, _ = await resolve_barcode(session, "17600", "sku", ENABLED)
+        assert source == "inventory"
+        assert fields["brand"] == "Bambu Lab"
+
+    async def test_other_code_matches_case_insensitively(self, engine):
+        """A user-owned other_code (self-printed barcode) stores the user's
+        casing verbatim but must still resolve on re-scan — the scanned side
+        arrives canonicalized (uppercased), so the match is case-insensitive."""
+        from backend.app.schemas.spool import classify_code
+
+        canonical, kind = classify_code("MyShelf-a42")  # what the route passes in
+        assert canonical == "MYSHELF-A42"
+        async with AsyncSession(engine) as session:
+            await _insert_spool(session, 1, brand="Custom", other_code="MyShelf-a42")
+            with _forbid_external():
+                fields, source, _ = await resolve_barcode(session, canonical, kind, ENABLED)
+        assert source == "inventory"
+        assert fields["brand"] == "Custom"
+
+    async def test_newest_roll_wins_when_two_spools_share_a_code(self, engine):
+        """Six identical boxes = six rolls sharing one GTIN — resolution picks
+        the newest roll, so the freshest user edits become the template."""
+        async with AsyncSession(engine) as session:
+            await _insert_spool(session, 1, brand="Old", gtin_code="6938936716785", created_at=datetime(2024, 1, 1))
+            await _insert_spool(session, 2, brand="New", gtin_code="6938936716785", created_at=datetime(2024, 6, 1))
 
             with _forbid_external():
                 fields, source, _ = await resolve_barcode(session, "6938936716785", "gtin", ENABLED)
@@ -274,7 +321,7 @@ class TestResolveBarcode:
 
     async def test_spoolman_client_hit_resolves_from_spoolman_not_local_tables(self, engine):
         """With a Spoolman client supplied, 'own inventory' means Spoolman's
-        spools (extra.bambu_barcode) — the local tables are not consulted and
+        spools (typed bambu_* extras) — the local table is not consulted and
         external lookups are skipped."""
         spoolman_spool = {
             "id": 7,
@@ -285,8 +332,8 @@ class TestResolveBarcode:
                 "color_hex": "FF0000",
             },
             "extra": {
-                "bambu_barcode": '"6938936716785"',
-                "bambu_linked_codes": '[{"code": "ALZMNTABS01", "kind": "sku", "is_refill": false}]',
+                "bambu_gtin_code": '"6938936716785"',
+                "bambu_sku_code": '"ALZMNTABS01"',
             },
         }
         client = AsyncMock()
@@ -302,7 +349,7 @@ class TestResolveBarcode:
         assert source == "inventory"
         assert fields["material"] == "PLA"
         assert fields["brand"] == "Bambu Lab"
-        assert [c["code"] for c in all_codes] == ["ALZMNTABS01"]
+        assert {c["code"] for c in all_codes} == {"6938936716785", "ALZMNTABS01"}
 
     async def test_spoolman_error_falls_back_to_external(self, engine):
         client = AsyncMock()
@@ -329,295 +376,98 @@ class TestResolveBarcode:
                 assert await resolve_barcode(session, "111111111117", "gtin", DISABLED) == ({}, None, [])
 
 
-class TestPersistSpoolCodes:
-    async def test_persists_primary_and_siblings(self, engine):
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            await persist_spool_codes(
-                session,
-                spool_id=1,
-                primary_code="6938936716785",
-                primary_kind="gtin",
-                all_codes=[
-                    {"code": "6938936716785", "kind": "gtin", "is_refill": False},
-                    {"code": "6938936716786", "kind": "gtin", "is_refill": True},
-                    {"code": "ALZMNTABS01", "kind": "sku", "is_refill": False},
-                ],
-            )
-            codes = await _codes_for(session, 1)
+class TestRouteScannedCode:
+    async def test_empty_scan_routes_nothing(self):
+        with _forbid_external():
+            routed = await route_scanned_code("  ", ENABLED)
+        assert routed == {"gtin_code": None, "asin_code": None, "sku_code": None, "other_code": None}
 
-        by_code = {c.code: c for c in codes}
-        assert set(by_code) == {"6938936716785", "6938936716786", "ALZMNTABS01"}
-        assert by_code["6938936716785"].is_primary is True
-        assert by_code["6938936716786"].is_primary is False
-        assert by_code["6938936716786"].is_refill is True
-        assert by_code["ALZMNTABS01"].kind == "sku"
+    async def test_gtin_scan_fills_gtin_and_pairs_sku_from_ofd(self):
+        """Scan the box GTIN: gtin_code = the canonical scan, sku_code = the
+        article printed on the SAME size row (OFD pairing) — never a sibling
+        from another package size."""
+        with _patch_external(ofd_paired=(True, "17600")):
+            routed = await route_scanned_code("06938936716785", ENABLED)
+        assert routed["gtin_code"] == "6938936716785"
+        assert routed["sku_code"] == "17600"
+        assert routed["other_code"] is None
 
-    async def test_primary_is_refill_flag_is_stored(self, engine):
-        # A user-linked / manually-typed code carries no DB refill signal, so the
-        # caller (SpoolBuddy refill toggle) supplies primary_is_refill.
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            await persist_spool_codes(
-                session,
-                spool_id=1,
-                primary_code="6938936716785",
-                primary_kind="gtin",
-                all_codes=[],
-                primary_is_refill=True,
-            )
-            codes = await _codes_for(session, 1)
-
-        assert len(codes) == 1
-        assert codes[0].is_primary is True
-        assert codes[0].is_refill is True
-
-    async def test_is_refill_property_reflects_primary_code(self, engine):
-        # The Spool.is_refill read property (drives the UI "Refill" badge) must
-        # mirror the primary SpoolCode's is_refill, and be False otherwise.
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            await persist_spool_codes(
-                session, spool_id=1, primary_code="R", primary_kind="gtin", all_codes=[], primary_is_refill=True
-            )
-            await _insert_spool(session, 2)
-            await persist_spool_codes(
-                session, spool_id=2, primary_code="W", primary_kind="gtin", all_codes=[], primary_is_refill=False
-            )
-            loaded = {}
-            for sid in (1, 2):
-                res = await session.execute(select(Spool).options(selectinload(Spool.codes)).where(Spool.id == sid))
-                loaded[sid] = res.scalar_one()
-            assert loaded[1].is_refill is True
-            assert loaded[2].is_refill is False
-
-    async def test_dedupes_against_existing_rows(self, engine):
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            session.add(SpoolCode(spool_id=1, code="6938936716785", kind="gtin", is_primary=True))
-            await session.commit()
-
-            await persist_spool_codes(
-                session,
-                spool_id=1,
-                primary_code="6938936716785",
-                primary_kind="gtin",
-                all_codes=[{"code": "6938936716785", "kind": "gtin", "is_refill": False}],
-            )
-            codes = await _codes_for(session, 1)
-
-        assert len(codes) == 1
-
-    async def test_no_siblings_still_persists_primary(self, engine):
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            await persist_spool_codes(session, spool_id=1, primary_code="ALZMNTABS01", primary_kind="sku", all_codes=[])
-            codes = await _codes_for(session, 1)
-
-        assert len(codes) == 1
-        assert codes[0].code == "ALZMNTABS01"
-        assert codes[0].kind == "sku"
-        assert codes[0].is_primary is True
-
-    async def test_second_call_with_new_siblings_adds_only_new_rows(self, engine):
-        """A later scan that discovers additional sibling codes for an already-
-        persisted primary must add just the new rows, not duplicate existing ones."""
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            await persist_spool_codes(
-                session, spool_id=1, primary_code="6938936716785", primary_kind="gtin", all_codes=[]
-            )
-            await persist_spool_codes(
-                session,
-                spool_id=1,
-                primary_code="6938936716785",
-                primary_kind="gtin",
-                all_codes=[
-                    {"code": "6938936716785", "kind": "gtin", "is_refill": False},
-                    {"code": "ALZMNTABS01", "kind": "sku", "is_refill": False},
-                ],
-            )
-            codes = await _codes_for(session, 1)
-
-        assert {c.code for c in codes} == {"6938936716785", "ALZMNTABS01"}
-
-    async def test_entries_without_code_are_skipped_and_kind_defaults_to_gtin(self, engine):
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            await persist_spool_codes(
-                session,
-                spool_id=1,
-                primary_code="6938936716785",
-                primary_kind="gtin",
-                all_codes=[{"code": "", "kind": "sku"}, {"kind": "sku"}, {"code": "6938936716786"}],
-            )
-            codes = await _codes_for(session, 1)
-
-        by_code = {c.code: c for c in codes}
-        assert set(by_code) == {"6938936716785", "6938936716786"}
-        assert by_code["6938936716786"].kind == "gtin"
-        assert by_code["6938936716786"].is_refill is False
-
-
-class TestResolveCodesForBarcode:
-    async def test_classifies_and_returns_external_siblings(self):
-        external = (
+    async def test_gtin_scan_falls_back_to_smdb_same_package_codes(self):
+        """No OFD pairing: SpoolmanDB variants are per-package, so their code
+        list may fill the SKU/ASIN slots."""
+        smdb_hit = (
             {"material": "PLA"},
-            "ofd",
-            [{"code": "ALZMNTABS01", "kind": "sku", "is_refill": False}],
-        )
-        with patch(
-            "backend.app.services.barcode_resolver.external_all_codes", new=AsyncMock(return_value=external)
-        ) as mock_external:
-            code, kind, all_codes = await resolve_codes_for_barcode("06938936716785", ENABLED)
-
-        # Raw scan is canonicalized (leading zero stripped) before the lookup.
-        mock_external.assert_awaited_once_with("6938936716785", "gtin", ENABLED)
-        assert (code, kind) == ("6938936716785", "gtin")
-        assert [c["code"] for c in all_codes] == ["ALZMNTABS01"]
-
-    async def test_external_failure_degrades_to_primary_alone(self):
-        """A cross-reference exception must not lose the scanned code — the
-        spool still gets created/imported with just its primary code."""
-        with patch(
-            "backend.app.services.barcode_resolver.external_all_codes",
-            new=AsyncMock(side_effect=RuntimeError("boom")),
-        ):
-            code, kind, all_codes = await resolve_codes_for_barcode("ALZMNTABS01", ENABLED)
-
-        assert (code, kind) == ("ALZMNTABS01", "sku")
-        assert all_codes == []
-
-
-class TestPersistBarcodeCodesForSpool:
-    async def test_no_barcode_is_a_no_op_on_fresh_spool(self, engine):
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            with patch("backend.app.services.barcode_resolver.external_all_codes", new=AsyncMock()) as mock_external:
-                await persist_barcode_codes_for_spool(session, spool_id=1, barcode=None, settings=ENABLED)
-            mock_external.assert_not_called()
-            assert await _codes_for(session, 1) == []
-
-    async def test_persists_primary_plus_cross_referenced_siblings(self, engine):
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            external = (
-                {"material": "PLA"},
-                "ofd",
-                [
-                    {"code": "6938936716785", "kind": "gtin", "is_refill": False},
-                    {"code": "ALZMNTABS01", "kind": "sku", "is_refill": False},
-                ],
-            )
-            with patch(
-                "backend.app.services.barcode_resolver.external_all_codes", new=AsyncMock(return_value=external)
-            ):
-                await persist_barcode_codes_for_spool(session, spool_id=1, barcode="06938936716785", settings=ENABLED)
-            codes = await _codes_for(session, 1)
-
-        assert {c.code for c in codes} == {"6938936716785", "ALZMNTABS01"}
-        primary = next(c for c in codes if c.code == "6938936716785")
-        assert primary.is_primary is True
-
-    async def test_no_external_hit_still_persists_scanned_code_alone(self, engine):
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            with patch("backend.app.services.barcode_resolver.external_all_codes", new=AsyncMock(return_value=None)):
-                await persist_barcode_codes_for_spool(session, spool_id=1, barcode="ALZMNTABS01", settings=ENABLED)
-            codes = await _codes_for(session, 1)
-
-        assert len(codes) == 1
-        assert codes[0].code == "ALZMNTABS01"
-        assert codes[0].kind == "sku"
-
-    async def test_cross_reference_failure_still_persists_primary_alone(self, engine):
-        """An external-lookup exception must degrade to persisting just the
-        scanned code, not lose it entirely (resolve_codes_for_barcode swallows
-        the exception)."""
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            with patch(
-                "backend.app.services.barcode_resolver.external_all_codes",
-                new=AsyncMock(side_effect=RuntimeError("boom")),
-            ):
-                await persist_barcode_codes_for_spool(session, spool_id=1, barcode="ALZMNTABS01", settings=ENABLED)
-            codes = await _codes_for(session, 1)
-
-        assert len(codes) == 1
-        assert codes[0].code == "ALZMNTABS01"
-        assert codes[0].kind == "sku"
-
-    async def test_barcode_change_replaces_old_bundle(self, engine):
-        """Delete-then-insert: editing barcode A -> B must remove A's row AND
-        every sibling discovered for A, leaving exactly one is_primary row (B).
-        Without the delete, both bundles coexisted and the stale barcode kept
-        resolving on scan."""
-        external_a = (
-            {"material": "PLA"},
-            "ofd",
             [
                 {"code": "6938936716785", "kind": "gtin", "is_refill": False},
-                {"code": "ALZMNTABS01", "kind": "sku", "is_refill": False},
+                {"code": "17600", "kind": "sku", "is_refill": False},
+                {"code": "B0CJLR62MF", "kind": "sku", "is_refill": False},
             ],
         )
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            with patch(
-                "backend.app.services.barcode_resolver.external_all_codes", new=AsyncMock(return_value=external_a)
-            ):
-                await persist_barcode_codes_for_spool(session, spool_id=1, barcode="06938936716785", settings=ENABLED)
-            assert {c.code for c in await _codes_for(session, 1)} == {"6938936716785", "ALZMNTABS01"}
+        with _patch_external(smdb=smdb_hit):
+            routed = await route_scanned_code("6938936716785", ENABLED)
+        assert routed["gtin_code"] == "6938936716785"
+        assert routed["sku_code"] == "17600"
+        assert routed["asin_code"] == "B0CJLR62MF"
 
-            with patch("backend.app.services.barcode_resolver.external_all_codes", new=AsyncMock(return_value=None)):
-                await persist_barcode_codes_for_spool(session, spool_id=1, barcode="012345678905", settings=ENABLED)
+    async def test_asin_scan_fills_asin_and_cross_fills_gtin(self):
+        smdb_hit = (
+            {"material": "PLA"},
+            [
+                {"code": "6938936716785", "kind": "gtin", "is_refill": False},
+                {"code": "B0CJLR62MF", "kind": "sku", "is_refill": False},
+            ],
+        )
+        with _patch_external(smdb_sku=smdb_hit):
+            routed = await route_scanned_code("B0CJLR62MF", ENABLED)
+        assert routed["asin_code"] == "B0CJLR62MF"
+        assert routed["gtin_code"] == "6938936716785"
+        assert routed["other_code"] is None
 
-            # SQLite reuses a deleted row's rowid on the next insert, so the
-            # identity map could hand back a stale cached object for that PK.
-            session.expire_all()
-            codes = await _codes_for(session, 1)
+    async def test_refill_flag_picks_the_matching_gtin(self):
+        """A SpoolmanDB variant lists the with-spool EAN and the refill EAN
+        side by side — bought_as_refill selects the right one."""
+        smdb_hit = (
+            {"material": "PLA"},
+            [
+                {"code": "6938936716785", "kind": "gtin", "is_refill": False},
+                {"code": "6938936716786", "kind": "gtin", "is_refill": True},
+                {"code": "17600", "kind": "sku", "is_refill": False},
+            ],
+        )
+        with _patch_external(smdb_sku=smdb_hit):
+            refill = await route_scanned_code("17600", ENABLED, bought_as_refill=True)
+            with_spool = await route_scanned_code("17600", ENABLED, bought_as_refill=False)
+        assert refill["gtin_code"] == "6938936716786"
+        assert with_spool["gtin_code"] == "6938936716785"
 
-        assert {c.code for c in codes} == {"12345678905"}
-        assert codes[0].is_primary is True
+    async def test_known_sku_scan_lands_in_sku_code(self):
+        with _patch_external(ofd_paired=(True, "6938936716785")):
+            routed = await route_scanned_code("17600", ENABLED)
+        assert routed["sku_code"] == "17600"
+        assert routed["gtin_code"] == "6938936716785"
+        assert routed["other_code"] is None
 
-    async def test_clearing_barcode_deletes_all_rows(self, engine):
-        external = ({"material": "PLA"}, "ofd", [{"code": "ALZMNTABS01", "kind": "sku", "is_refill": False}])
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            with patch(
-                "backend.app.services.barcode_resolver.external_all_codes", new=AsyncMock(return_value=external)
-            ):
-                await persist_barcode_codes_for_spool(session, spool_id=1, barcode="06938936716785", settings=ENABLED)
-            assert len(await _codes_for(session, 1)) == 2
+    async def test_unknown_code_lands_verbatim_in_other_code(self):
+        """Not a GTIN, not an ASIN, unknown to both DBs: the user's own code
+        space — trimmed, case preserved, no other column touched."""
+        with _patch_external():
+            routed = await route_scanned_code("  MyShelf-a42  ", ENABLED)
+        assert routed == {
+            "gtin_code": None,
+            "asin_code": None,
+            "sku_code": None,
+            "other_code": "MyShelf-a42",
+        }
 
-            await persist_barcode_codes_for_spool(session, spool_id=1, barcode=None, settings=ENABLED)
-            session.expire_all()
-            assert await _codes_for(session, 1) == []
-
-    async def test_disabled_toggle_persists_primary_without_touching_external_clients(self, engine):
-        """The write-path half of the toggle gate: saving a spool with a barcode
-        while lookups are disabled still stores the primary SpoolCode row, but
-        never reaches OFD/SpoolmanDB-Community (the real external_all_codes
-        gating logic runs here — only the clients themselves are patched)."""
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            with _forbid_external():
-                await persist_barcode_codes_for_spool(session, spool_id=1, barcode="06938936716785", settings=DISABLED)
-            codes = await _codes_for(session, 1)
-
-        assert len(codes) == 1
-        assert codes[0].code == "6938936716785"
-        assert codes[0].kind == "gtin"
-        assert codes[0].is_primary is True
-
-    async def test_primary_is_refill_reaches_the_primary_row(self, engine):
-        async with AsyncSession(engine) as session:
-            await _insert_spool(session, 1)
-            with patch("backend.app.services.barcode_resolver.external_all_codes", new=AsyncMock(return_value=None)):
-                await persist_barcode_codes_for_spool(
-                    session, spool_id=1, barcode="06938936716785", settings=ENABLED, primary_is_refill=True
-                )
-            codes = await _codes_for(session, 1)
-
-        assert len(codes) == 1
-        assert codes[0].is_primary is True
-        assert codes[0].is_refill is True
+    async def test_lookup_disabled_still_routes_structurally(self):
+        """With the toggle off there is no cross-fill and no sku/other
+        promotion evidence — a GTIN still lands structurally, an alphanumeric
+        candidate conservatively lands in other_code, and no external client
+        is touched."""
+        with _forbid_external():
+            gtin = await route_scanned_code("6938936716785", ENABLED | DISABLED)
+            unknown = await route_scanned_code("17600", ENABLED | DISABLED)
+        assert gtin["gtin_code"] == "6938936716785"
+        assert gtin["sku_code"] is None
+        assert unknown["other_code"] == "17600"
+        assert unknown["sku_code"] is None

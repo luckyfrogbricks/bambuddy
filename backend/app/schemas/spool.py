@@ -118,14 +118,19 @@ def _gtin_checksum_valid(digits: str) -> bool:
     return (10 - (total % 10)) % 10 == check
 
 
-def classify_code(raw: str | None) -> tuple[str, str]:
-    """Canonicalize `raw` exactly like `normalize_barcode`, then classify the
-    result as ("gtin", canonical-digits) or ("sku", canonical-stripped-upper).
+# Modern Amazon ASINs: exactly "B0" + 8 alphanumerics. Legacy ISBN-10 ASINs
+# (books) are all-digit and 10 long — not a GTIN length, so they'd classify
+# as "sku", which is fine: no filament carries one.
+_ASIN_RE = re.compile(r"^B0[A-Z0-9]{8}$")
 
-    The kind strings are the values of ``SpoolCodeKind`` in
-    ``backend/app/models/spool_code.py`` — returned as plain strings so this
-    schema module stays free of ORM imports; a unit test locks the two
-    vocabularies together.
+
+def classify_code(raw: str | None) -> tuple[str, str]:
+    """Canonicalize `raw` exactly like `normalize_barcode`, then classify it
+    down the ladder: ("gtin", digits) → ("asin", B0-shaped) → ("sku",
+    stripped-upper). "sku" is a *candidate*: whether it is a real
+    manufacturer SKU or some other box code (lot number, FNSKU) can only be
+    decided by external knowledge — a community-DB hit or a user link — not
+    by the string itself.
 
     Classification runs on the *canonicalized* value, not the raw input, so
     a freshly-scanned barcode and that same barcode already stored on a spool
@@ -151,7 +156,53 @@ def classify_code(raw: str | None) -> tuple[str, str]:
         and _gtin_checksum_valid(canonical.zfill(_MAX_GTIN_LENGTH))
     ):
         return canonical, "gtin"
+    if _ASIN_RE.match(canonical):
+        return canonical, "asin"
     return canonical, "sku"
+
+
+def normalize_gtin_code(value: str | None) -> str | None:
+    """Validate + canonicalize a value for the GTIN-only `gtin_code` column.
+
+    Only true retail barcodes belong there — anything that doesn't pass the
+    GTIN structure/checksum is rejected rather than silently reclassified.
+    """
+    if value is None or not value.strip():
+        return None
+    canonical, kind = classify_code(value)
+    if kind != "gtin":
+        raise ValueError("gtin_code must be a valid GTIN (EAN/UPC with check digit)")
+    return canonical
+
+
+def normalize_asin_code(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip().upper()
+    if not stripped:
+        return None
+    if not re.fullmatch(r"[A-Z0-9]{10}", stripped):
+        raise ValueError("asin_code must be a 10-character Amazon ASIN")
+    return stripped
+
+
+def normalize_sku_code(value: str | None) -> str | None:
+    # Trim + uppercase only — no GTIN digit-canonicalization; a numeric SKU
+    # like "17600" must store byte-for-byte as printed.
+    if value is None:
+        return None
+    stripped = value.strip().upper()
+    return stripped or None
+
+
+def normalize_other_code(value: str | None) -> str | None:
+    # User-owned code space (self-printed barcodes welcome): trim only. The
+    # app imposes no case/format/uniqueness semantics here, and these values
+    # are never submitted to a community database.
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 class SpoolBase(BaseModel):
@@ -173,11 +224,6 @@ class SpoolBase(BaseModel):
     def _validate_effect_type(cls, v: str | None) -> str | None:
         return normalize_effect_type(v)
 
-    @field_validator("barcode")
-    @classmethod
-    def _validate_barcode(cls, v: str | None) -> str | None:
-        return normalize_barcode(v)
-
     label_weight: int = 1000
     core_weight: int = 250
     core_weight_catalog_id: int | None = None
@@ -196,7 +242,18 @@ class SpoolBase(BaseModel):
     tray_uuid: str | None = None
     data_origin: str | None = None
     tag_type: str | None = None
-    barcode: str | None = Field(default=None, max_length=64)  # matches Spool.barcode's VARCHAR(64)
+    # Typed code columns — see the classification ladder in classify_code.
+    # gtin_code holds true retail barcodes ONLY; sku_code the manufacturer
+    # article number; asin_code an Amazon ASIN; other_code is the user's own
+    # code space (no semantics imposed, never submitted upstream).
+    gtin_code: str | None = Field(default=None, max_length=64)
+    asin_code: str | None = Field(default=None, max_length=16)
+    sku_code: str | None = Field(default=None, max_length=64)
+    other_code: str | None = Field(default=None, max_length=64)
+    # How the roll was purchased (refill coil vs boxed with a spool). Not
+    # "is_refill": a refill eventually gets mounted on a spool — this flag
+    # records purchase form, not current physical state (core_weight does).
+    bought_as_refill: bool = False
     cost_per_kg: float | None = Field(default=None, ge=0)
     weight_locked: bool = False
     last_scale_weight: int | None = None
@@ -212,12 +269,36 @@ class SpoolBase(BaseModel):
 
 
 class SpoolCreate(SpoolBase):
-    # Write-only hint: whether `barcode` is the "refill" (no-spool) variant.
-    # Community DBs mark this via eans_refill/spool_refill, but a user-linked or
-    # manually-typed code carries no such signal, so the SpoolBuddy scan flow
-    # lets the user set it. Persisted onto the barcode's SpoolCode row; not a
-    # Spool column, so it's popped before the ORM object is built.
-    barcode_is_refill: bool = False
+    # Write-only: the raw code a scanner read (either symbology). The create
+    # route classifies it down the ladder (GTIN / ASIN / SKU-candidate),
+    # stores it in the matching *_code column when that column wasn't set
+    # explicitly, and cross-fills the sibling columns from the community DBs
+    # under the size-consistency rule. Explicit *_code fields always win.
+    scanned_code: str | None = Field(default=None, max_length=64)
+
+    # The code validators live on the WRITE schemas (here and SpoolUpdate),
+    # not SpoolBase — SpoolResponse inherits SpoolBase, and a legacy/
+    # hand-edited row that fails validation must still read back instead of
+    # 500ing the inventory list (same escape hatch as rgba, #1055).
+    @field_validator("gtin_code")
+    @classmethod
+    def _validate_gtin_code(cls, v: str | None) -> str | None:
+        return normalize_gtin_code(v)
+
+    @field_validator("asin_code")
+    @classmethod
+    def _validate_asin_code(cls, v: str | None) -> str | None:
+        return normalize_asin_code(v)
+
+    @field_validator("sku_code")
+    @classmethod
+    def _validate_sku_code(cls, v: str | None) -> str | None:
+        return normalize_sku_code(v)
+
+    @field_validator("other_code")
+    @classmethod
+    def _validate_other_code(cls, v: str | None) -> str | None:
+        return normalize_other_code(v)
 
 
 class SpoolBulkCreate(BaseModel):
@@ -244,10 +325,25 @@ class SpoolUpdate(BaseModel):
     def _validate_effect_type(cls, v: str | None) -> str | None:
         return normalize_effect_type(v)
 
-    @field_validator("barcode")
+    @field_validator("gtin_code")
     @classmethod
-    def _validate_barcode(cls, v: str | None) -> str | None:
-        return normalize_barcode(v)
+    def _validate_gtin_code(cls, v: str | None) -> str | None:
+        return normalize_gtin_code(v)
+
+    @field_validator("asin_code")
+    @classmethod
+    def _validate_asin_code(cls, v: str | None) -> str | None:
+        return normalize_asin_code(v)
+
+    @field_validator("sku_code")
+    @classmethod
+    def _validate_sku_code(cls, v: str | None) -> str | None:
+        return normalize_sku_code(v)
+
+    @field_validator("other_code")
+    @classmethod
+    def _validate_other_code(cls, v: str | None) -> str | None:
+        return normalize_other_code(v)
 
     label_weight: int | None = None
     core_weight: int | None = None
@@ -262,7 +358,11 @@ class SpoolUpdate(BaseModel):
     tray_uuid: str | None = None
     data_origin: str | None = None
     tag_type: str | None = None
-    barcode: str | None = Field(default=None, max_length=64)  # matches Spool.barcode's VARCHAR(64)
+    gtin_code: str | None = Field(default=None, max_length=64)
+    asin_code: str | None = Field(default=None, max_length=16)
+    sku_code: str | None = Field(default=None, max_length=64)
+    other_code: str | None = Field(default=None, max_length=64)
+    bought_as_refill: bool | None = None
     cost_per_kg: float | None = Field(default=None, ge=0)
     weight_locked: bool | None = None
     # User-defined category + per-spool low-stock threshold override (#729).
@@ -300,7 +400,7 @@ class LinkedCode(BaseModel):
     itself. See `resolve_barcode` in `services/barcode_resolver.py`."""
 
     code: str
-    kind: str  # a SpoolCodeKind value: "gtin" | "sku"
+    kind: str  # "gtin" | "sku" (community data files ASINs under sku)
     is_refill: bool = False
 
     # from_attributes on the nested model itself, not just on its parents:
@@ -320,10 +420,13 @@ class SpoolResponse(SpoolBase):
     # or data sourced from AMS firmware / backups may carry malformed values.
     # A single bad row must not 500 the entire inventory list endpoint (#1055).
     rgba: str | None = None
-    # Same rationale as rgba: the write paths cap barcode at 64 chars (matching
-    # the DB column), but SQLite doesn't enforce VARCHAR length, so an
-    # over-length row must still read back without 500ing the inventory list.
-    barcode: str | None = None
+    # Same rationale as rgba: the write paths validate/cap the code columns,
+    # but SQLite doesn't enforce VARCHAR length or our format rules, so a
+    # legacy/hand-edited row must still read back without 500ing the list.
+    gtin_code: str | None = None
+    asin_code: str | None = None
+    sku_code: str | None = None
+    other_code: str | None = None
     added_full: bool | None = None
     last_used: datetime | None = None
     encode_time: datetime | None = None
@@ -335,11 +438,6 @@ class SpoolResponse(SpoolBase):
     created_at: datetime
     updated_at: datetime
     k_profiles: list[SpoolKProfileResponse] = []
-    linked_codes: list[LinkedCode] = []
-    # Read-only: whether the primary barcode is the no-spool "refill" variant
-    # (from its SpoolCode row). Drives the "Refill" badge in the UI. Populated
-    # from the Spool.is_refill property.
-    is_refill: bool = False
 
     class Config:
         from_attributes = True

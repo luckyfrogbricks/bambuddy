@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.color_catalog import ColorCatalogEntry
 from backend.app.models.spool import Spool
-from backend.app.models.spool_code import SpoolCode
 
 
 def _csv_upload(text: str):
@@ -492,22 +491,28 @@ class TestInventoryCsvExtraColumns:
         assert data["error_count"] == 1
         assert "low_stock_threshold_pct" in data["rows"][0]["reason"]
 
-    async def test_barcode_round_trip(self, async_client: AsyncClient, db_session: AsyncSession):
-        # barcode must survive an export → import cycle, canonicalized the
-        # same way a manual form edit or a scan would be (no leading zeros).
+    async def test_code_columns_round_trip(self, async_client: AsyncClient, db_session: AsyncSession):
+        # The typed code columns + bought_as_refill must survive an
+        # export → import cycle, validated the same way a manual form edit
+        # or a scan would be.
         db_session.add(
             Spool(
                 material="PLA",
                 brand="Sunlu",
                 color_name="Black",
                 rgba="000000ff",
-                barcode="6938936716785",
+                gtin_code="6938936716785",
+                sku_code="ALZMNTABS01",
+                other_code="MyShelf-a42",
+                bought_as_refill=True,
             )
         )
         await db_session.commit()
 
         csv_text = (await async_client.get("/api/v1/inventory/spools/export")).text
-        assert "barcode" in csv_text.splitlines()[0]
+        header = csv_text.splitlines()[0]
+        for column in ("gtin_code", "asin_code", "sku_code", "other_code", "bought_as_refill"):
+            assert column in header
         assert "6938936716785" in csv_text
 
         for spool in (await db_session.execute(select(Spool))).scalars().all():
@@ -519,53 +524,52 @@ class TestInventoryCsvExtraColumns:
         assert response.json()["created"] == 1
 
         spool = (await db_session.execute(select(Spool))).scalars().one()
-        assert spool.barcode == "6938936716785"
+        assert spool.gtin_code == "6938936716785"
+        assert spool.sku_code == "ALZMNTABS01"
+        assert spool.other_code == "MyShelf-a42"
+        assert spool.bought_as_refill is True
 
-    async def test_barcode_is_canonicalized_on_import(self, async_client: AsyncClient, db_session: AsyncSession):
+    async def test_gtin_code_is_canonicalized_on_import(self, async_client: AsyncClient, db_session: AsyncSession):
         # A leading-zero EAN-13 typed straight into the CSV must normalize to
         # the same canonical form the scan-to-add lookup uses, so it still
         # matches a later scan of the UPC-A printing of the same barcode.
-        csv_text = "material,barcode\nPLA,0012345678905\n"
+        csv_text = "material,gtin_code\nPLA,0012345678905\n"
 
         response = await async_client.post("/api/v1/inventory/spools/import", files=_csv_upload(csv_text))
         assert response.status_code == 200, response.text
         assert response.json()["created"] == 1
 
         spool = (await db_session.execute(select(Spool))).scalars().one()
-        assert spool.barcode == "12345678905"
+        assert spool.gtin_code == "12345678905"
 
-    async def test_alphanumeric_sku_barcode_imports_intact(self, async_client: AsyncClient, db_session: AsyncSession):
-        # A manufacturer SKU/article number (e.g. a Polymaker inventory
-        # barcode with no UPC/EAN counterpart) must survive CSV import
-        # unmangled, same as scanning/typing it into the form does.
-        csv_text = "material,barcode\nPLA,ALZMNTABS01\n"
-
-        response = await async_client.post("/api/v1/inventory/spools/import", files=_csv_upload(csv_text))
-        assert response.status_code == 200, response.text
-        assert response.json()["created"] == 1
-
-        spool = (await db_session.execute(select(Spool))).scalars().one()
-        assert spool.barcode == "ALZMNTABS01"
-
-    async def test_garbage_barcode_cell_is_a_row_error(self, async_client: AsyncClient):
-        # A cell with no digits and no letters (e.g. a stray "---" placeholder)
-        # normalizes to None, which SpoolCreate accepts as "no barcode" — that
-        # would otherwise silently drop data the user actually typed. Must
-        # surface as a row error instead, like every other malformed column.
-        csv_text = "material,barcode\nPLA,---\n"
+    async def test_invalid_gtin_code_is_a_row_error(self, async_client: AsyncClient):
+        # A non-GTIN in the gtin_code column (bad checksum, or a SKU pasted
+        # into the wrong column) must surface as a row error — only true
+        # retail barcodes belong there.
+        csv_text = "material,gtin_code\nPLA,ALZMNTABS01\n"
 
         response = await async_client.post("/api/v1/inventory/spools/import?dry_run=true", files=_csv_upload(csv_text))
 
         assert response.status_code == 200, response.text
         data = response.json()
         assert data["error_count"] == 1
-        assert "barcode" in data["rows"][0]["reason"]
+        assert "gtin_code" in data["rows"][0]["reason"]
 
-    async def test_import_without_barcode_column_defaults_to_none(
+    async def test_invalid_bought_as_refill_is_a_row_error(self, async_client: AsyncClient):
+        csv_text = "material,bought_as_refill\nPLA,maybe\n"
+
+        response = await async_client.post("/api/v1/inventory/spools/import?dry_run=true", files=_csv_upload(csv_text))
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["error_count"] == 1
+        assert "bought_as_refill" in data["rows"][0]["reason"]
+
+    async def test_import_without_code_columns_defaults_to_none(
         self, async_client: AsyncClient, db_session: AsyncSession
     ):
-        # A CSV that never had the barcode column (e.g. exported before this
-        # feature existed, or hand-written) must import cleanly with barcode
+        # A CSV that never had the code columns (e.g. exported before this
+        # feature existed, or hand-written) must import cleanly with them
         # left unset — not an error, not a missing-column failure.
         csv_text = "material,brand,color_name,rgba\nPLA,Sunlu,Black,000000ff\n"
 
@@ -574,67 +578,24 @@ class TestInventoryCsvExtraColumns:
         assert response.json()["created"] == 1
 
         spool = (await db_session.execute(select(Spool))).scalars().one()
-        assert spool.barcode is None
+        assert spool.gtin_code is None
+        assert spool.sku_code is None
+        assert spool.bought_as_refill is False
 
 
 @pytest.mark.asyncio
 @pytest.mark.integration
-class TestInventoryCsvImportPersistsSpoolCodes:
-    """A CSV-imported spool must get SpoolCode rows exactly like every other
-    create path, so it resolves on a future scan without waiting for a
-    restart to trigger the backfill migration."""
+class TestInventoryCsvImportedCodesResolve:
+    """CSV-imported typed code columns must resolve on a future scan — the
+    inventory rung matches the columns directly, no side-table or external
+    lookup involved."""
 
-    async def test_gtin_barcode_row_persists_spool_code(self, async_client: AsyncClient, db_session: AsyncSession):
-        csv_text = "material,barcode\nPLA,0012345678905\n"
-
-        with (
-            patch("backend.app.services.ofd_client.lookup", new=AsyncMock(return_value=None)),
-            patch("backend.app.services.ofd_client.lookup_article", new=AsyncMock(return_value=None)),
-            patch("backend.app.services.spoolmandb_community_client.lookup", new=AsyncMock(return_value=None)),
-            patch("backend.app.services.spoolmandb_community_client.lookup_sku", new=AsyncMock(return_value=None)),
-        ):
-            response = await async_client.post("/api/v1/inventory/spools/import", files=_csv_upload(csv_text))
-        assert response.status_code == 200, response.text
-        assert response.json()["created"] == 1
-
-        spool = (await db_session.execute(select(Spool))).scalars().one()
-        codes = (await db_session.execute(select(SpoolCode).where(SpoolCode.spool_id == spool.id))).scalars().all()
-        assert len(codes) == 1
-        assert codes[0].code == "12345678905"
-        assert codes[0].kind == "gtin"
-        assert codes[0].is_primary is True
-
-    async def test_sku_barcode_row_persists_spool_code(self, async_client: AsyncClient, db_session: AsyncSession):
-        csv_text = "material,barcode\nPLA,ALZMNTABS01\n"
-
-        with (
-            patch("backend.app.services.ofd_client.lookup", new=AsyncMock(return_value=None)),
-            patch("backend.app.services.ofd_client.lookup_article", new=AsyncMock(return_value=None)),
-            patch("backend.app.services.spoolmandb_community_client.lookup", new=AsyncMock(return_value=None)),
-            patch("backend.app.services.spoolmandb_community_client.lookup_sku", new=AsyncMock(return_value=None)),
-        ):
-            response = await async_client.post("/api/v1/inventory/spools/import", files=_csv_upload(csv_text))
-        assert response.status_code == 200, response.text
-        assert response.json()["created"] == 1
-
-        spool = (await db_session.execute(select(Spool))).scalars().one()
-        codes = (await db_session.execute(select(SpoolCode).where(SpoolCode.spool_id == spool.id))).scalars().all()
-        assert len(codes) == 1
-        assert codes[0].code == "ALZMNTABS01"
-        assert codes[0].kind == "sku"
-
-    async def test_imported_barcode_resolves_from_inventory_on_rescan(
+    async def test_imported_gtin_resolves_from_inventory_on_rescan(
         self, async_client: AsyncClient, db_session: AsyncSession
     ):
-        csv_text = "material,barcode\nPLA,0012345678905\n"
+        csv_text = "material,gtin_code\nPLA,0012345678905\n"
 
-        with (
-            patch("backend.app.services.ofd_client.lookup", new=AsyncMock(return_value=None)),
-            patch("backend.app.services.ofd_client.lookup_article", new=AsyncMock(return_value=None)),
-            patch("backend.app.services.spoolmandb_community_client.lookup", new=AsyncMock(return_value=None)),
-            patch("backend.app.services.spoolmandb_community_client.lookup_sku", new=AsyncMock(return_value=None)),
-        ):
-            response = await async_client.post("/api/v1/inventory/spools/import", files=_csv_upload(csv_text))
+        response = await async_client.post("/api/v1/inventory/spools/import", files=_csv_upload(csv_text))
         assert response.status_code == 200, response.text
 
         with (
@@ -654,27 +615,24 @@ class TestInventoryCsvImportPersistsSpoolCodes:
         mock_smdb.assert_not_called()
         mock_smdb_sku.assert_not_called()
 
-    async def test_shared_barcode_resolved_once_across_import_batch(
-        self, async_client: AsyncClient, db_session: AsyncSession
-    ):
-        """Two rows sharing one barcode must trigger exactly one external
-        cross-reference lookup, not one per row."""
-        csv_text = "material,barcode\nPLA,ALZMNTABS01\nPETG,ALZMNTABS01\n"
+    async def test_imported_sku_resolves_on_rescan(self, async_client: AsyncClient, db_session: AsyncSession):
+        csv_text = "material,sku_code\nPLA,17600\n"
 
-        with patch(
-            "backend.app.services.barcode_resolver.external_all_codes", new=AsyncMock(return_value=None)
-        ) as mock_external:
-            response = await async_client.post("/api/v1/inventory/spools/import", files=_csv_upload(csv_text))
-
+        response = await async_client.post("/api/v1/inventory/spools/import", files=_csv_upload(csv_text))
         assert response.status_code == 200, response.text
-        assert response.json()["created"] == 2
-        assert mock_external.await_count == 1
 
-        spools = (await db_session.execute(select(Spool))).scalars().all()
-        for spool in spools:
-            codes = (await db_session.execute(select(SpoolCode).where(SpoolCode.spool_id == spool.id))).scalars().all()
-            assert len(codes) == 1
-            assert codes[0].code == "ALZMNTABS01"
+        with (
+            patch("backend.app.services.ofd_client.lookup", new=AsyncMock(return_value=None)),
+            patch("backend.app.services.ofd_client.lookup_article", new=AsyncMock(return_value=None)),
+            patch("backend.app.services.spoolmandb_community_client.lookup", new=AsyncMock(return_value=None)),
+            patch("backend.app.services.spoolmandb_community_client.lookup_sku", new=AsyncMock(return_value=None)),
+        ):
+            lookup_resp = await async_client.get("/api/v1/inventory/barcode/17600")
+
+        assert lookup_resp.status_code == 200
+        body = lookup_resp.json()
+        assert body["matched"] is True
+        assert body["source"] == "inventory"
 
 
 @pytest.mark.asyncio

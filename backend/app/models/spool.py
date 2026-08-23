@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, false, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.core.database import Base
@@ -67,9 +67,23 @@ class Spool(Base):
     encode_time: Mapped[datetime | None] = mapped_column(DateTime)  # When spool was encoded/written to tag
     tag_uid: Mapped[str | None] = mapped_column(String(32))  # RFID tag UID (up to 32 hex chars)
     tray_uuid: Mapped[str | None] = mapped_column(String(32))  # Bambu Lab spool UUID (32 hex chars)
-    barcode: Mapped[str | None] = mapped_column(
-        String(64), index=True
-    )  # Scanned UPC/EAN (canonicalized, no leading zeros) or manufacturer SKU
+    # Typed code columns (see classify_code's ladder in schemas/spool.py).
+    # gtin_code: the retail barcode ONLY (EAN/UPC, canonicalized, checksum-
+    # valid). sku_code: manufacturer SKU/article number. asin_code: Amazon
+    # ASIN. other_code: the user's own code space — self-printed barcodes
+    # welcome; no uniqueness semantics imposed, never submitted upstream.
+    # A scan fills its own column; siblings auto-fill from the community DBs
+    # under the size-consistency rule (same purchasable package only).
+    gtin_code: Mapped[str | None] = mapped_column(String(64), index=True)
+    asin_code: Mapped[str | None] = mapped_column(String(16), index=True)
+    sku_code: Mapped[str | None] = mapped_column(String(64), index=True)
+    other_code: Mapped[str | None] = mapped_column(String(64))
+    # How the roll was PURCHASED (refill coil vs boxed with a spool) — not
+    # current physical state: a refill mounted on a Bambu spool keeps this
+    # flag; its core_weight is what changes. Drives the "Refill pack" badge.
+    # server_default too (not just the Python-side default): raw-SQL inserts
+    # (migrations, tests) and rows predating the ALTER must land as FALSE.
+    bought_as_refill: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     data_origin: Mapped[str | None] = mapped_column(String(20))  # How data was populated: manual, rfid_auto, nfc_link
     tag_type: Mapped[str | None] = mapped_column(String(20))  # Tag vendor: bambulab, generic, etc.
     archived_at: Mapped[datetime | None] = mapped_column(DateTime)  # NULL = active
@@ -78,38 +92,9 @@ class Spool(Base):
 
     k_profiles: Mapped[list["SpoolKProfile"]] = relationship(back_populates="spool", cascade="all, delete-orphan")
     assignments: Mapped[list["SpoolAssignment"]] = relationship(back_populates="spool", cascade="all, delete-orphan")
-    # lazy="selectin": codes load eagerly with every Spool query, so the
-    # linked_codes / is_refill properties below are always safe to read in an
-    # async context. Chosen over per-route selectinload() options because a
-    # single forgotten option on any route returning SpoolResponse turns into
-    # a MissingGreenlet 500 in production — the eager default removes that
-    # whole failure class for one tiny extra SELECT per spool query.
-    codes: Mapped[list["SpoolCode"]] = relationship(
-        back_populates="spool", cascade="all, delete-orphan", lazy="selectin"
-    )
     location: Mapped["Location | None"] = relationship(back_populates="spools")
-
-    @property
-    def linked_codes(self) -> list["SpoolCode"]:
-        """Every discovered code except the primary one (already shown via `barcode`).
-
-        Read-only display data for SpoolResponse's `linked_codes` field. The
-        `codes` relationship is lazy="selectin", so it is already loaded on any
-        normally-queried instance; this property never triggers its own IO.
-        """
-        return [c for c in self.codes if not c.is_primary]
-
-    @property
-    def is_refill(self) -> bool:
-        """Whether this spool's primary barcode is the no-spool 'refill' variant.
-
-        Read-only display data for SpoolResponse's `is_refill` field. Same
-        loading contract as `linked_codes` above.
-        """
-        return any(c.is_primary and c.is_refill for c in self.codes)
 
 
 from backend.app.models.location import Location  # noqa: E402
 from backend.app.models.spool_assignment import SpoolAssignment  # noqa: E402
-from backend.app.models.spool_code import SpoolCode  # noqa: E402
 from backend.app.models.spool_k_profile import SpoolKProfile  # noqa: E402

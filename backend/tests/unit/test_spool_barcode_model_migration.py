@@ -1,29 +1,33 @@
-"""Model + migration tests for barcode support (#2648).
+"""Model + migration tests for the typed spool code columns (#2648).
 
-Covers the three DB-layer guarantees the feature stands on:
+Covers the DB-layer guarantees the feature stands on:
 
-- `_migrate_add_spool_barcode` upgrades a pre-feature database (spool table
-  with no barcode column) and is idempotent, with the dialect pinned so the
-  test's verdict doesn't depend on the developer's DATABASE_URL (the exact
-  failure mode a Postgres-based dev environment hit reviewing PR #1895).
-- The new `spool_code` table arrives from create_all() with its constraints
-  live: the kind CHECK (generated from SpoolCodeKind) and the
-  (spool_id, code) uniqueness.
-- `Spool.codes` is lazy="selectin", so `linked_codes` / `is_refill` are safe
-  to read on any normally-queried instance in an async context — no per-route
-  selectinload() needed, which is the whole point of the eager default.
+- `_migrate_add_spool_code_columns` upgrades a pre-feature database (spool
+  table with none of the code columns) and is idempotent, with the dialect
+  pinned so the test's verdict doesn't depend on the developer's
+  DATABASE_URL (the exact failure mode a Postgres-based dev environment hit
+  reviewing PR #1895).
+- A fresh create_all() install carries the columns + their indexes.
+- The TEMPORARY interim-schema teardown (`_migrate_drop_interim_spool_code_schema`,
+  stripped before the upstream PR) routes the old primary code into the right
+  typed column, carries the refill flag, deliberately does NOT migrate
+  sibling rows (they contained other package sizes' codes — the cross-size
+  contamination this schema change eliminates), and is a no-op on databases
+  that never ran the interim branch.
 """
 
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
-from backend.app.core.database import _migrate_add_spool_barcode
-from backend.app.models.spool import Spool
-from backend.app.models.spool_code import SpoolCode, SpoolCodeKind
+from backend.app.core.database import (
+    _migrate_add_spool_code_columns,
+    _migrate_drop_interim_spool_code_schema,
+)
+
+CODE_COLUMNS = ("gtin_code", "asin_code", "sku_code", "other_code", "bought_as_refill")
 
 
 @pytest.fixture(autouse=True)
@@ -33,9 +37,6 @@ def force_sqlite_dialect(monkeypatch):
 
     monkeypatch.setattr(db_dialect, "is_sqlite", lambda: True)
     monkeypatch.setattr(db_dialect, "is_postgres", lambda: False)
-    from backend.app.core import database as database_module
-
-    monkeypatch.setattr(database_module, "is_sqlite", lambda: True)
 
 
 @pytest.fixture
@@ -45,151 +46,136 @@ async def engine():
     await eng.dispose()
 
 
-@pytest.fixture
-async def migrated_engine():
-    """Engine with the full current schema (what a fresh install gets)."""
-    from backend.app.core.database import Base
-
-    eng = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield eng
-    await eng.dispose()
-
-
 async def _spool_columns(conn) -> set[str]:
     rows = (await conn.execute(text("PRAGMA table_info(spool)"))).fetchall()
     return {r[1] for r in rows}
 
 
-class TestAddSpoolBarcodeMigration:
-    @pytest.mark.asyncio
-    async def test_adds_column_and_index_to_pre_feature_table(self, engine):
+async def _spool_indexes(conn) -> set[str]:
+    return {r[1] for r in (await conn.execute(text("PRAGMA index_list(spool)"))).fetchall()}
+
+
+class TestAddSpoolCodeColumnsMigration:
+    async def test_adds_columns_and_indexes_to_pre_feature_table(self, engine):
         async with engine.begin() as conn:
-            # A pre-feature spool table: only the columns the migration touches.
             await conn.execute(text("CREATE TABLE spool (id INTEGER PRIMARY KEY, material VARCHAR(50))"))
             await conn.execute(text("INSERT INTO spool (id, material) VALUES (1, 'PLA')"))
 
-            assert "barcode" not in await _spool_columns(conn)
-            await _migrate_add_spool_barcode(conn)
-            assert "barcode" in await _spool_columns(conn)
+            assert not (set(CODE_COLUMNS) & await _spool_columns(conn))
+            await _migrate_add_spool_code_columns(conn)
+            assert set(CODE_COLUMNS) <= await _spool_columns(conn)
 
-            # PRAGMA index_list rows are (seq, name, unique, origin, partial).
-            index_names = {r[1] for r in (await conn.execute(text("PRAGMA index_list(spool)"))).fetchall()}
-            assert "ix_spool_barcode" in index_names
+            index_names = await _spool_indexes(conn)
+            assert {"ix_spool_gtin_code", "ix_spool_asin_code", "ix_spool_sku_code"} <= index_names
 
-            # Existing rows survive with barcode NULL.
-            row = (await conn.execute(text("SELECT id, barcode FROM spool WHERE id = 1"))).one()
-            assert row == (1, None)
-
-    @pytest.mark.asyncio
     async def test_is_idempotent(self, engine):
         async with engine.begin() as conn:
             await conn.execute(text("CREATE TABLE spool (id INTEGER PRIMARY KEY, material VARCHAR(50))"))
-            await _migrate_add_spool_barcode(conn)
-            # Second run must be a no-op, not an error (the "duplicate column"
-            # failure is swallowed by _safe_execute like every other migration).
-            await _migrate_add_spool_barcode(conn)
-            assert "barcode" in await _spool_columns(conn)
+            await _migrate_add_spool_code_columns(conn)
+            await _migrate_add_spool_code_columns(conn)  # must not raise
+            assert set(CODE_COLUMNS) <= await _spool_columns(conn)
+
+    async def test_fresh_create_all_has_columns_and_indexes(self):
+        from backend.app.core.database import Base
+
+        eng = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        try:
+            async with eng.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+                assert set(CODE_COLUMNS) <= await _spool_columns(conn)
+                index_names = await _spool_indexes(conn)
+                assert {"ix_spool_gtin_code", "ix_spool_asin_code", "ix_spool_sku_code"} <= index_names
+                # The interim table must NOT exist on a fresh install.
+                tables = {
+                    r[0]
+                    for r in (await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))).fetchall()
+                }
+                assert "spool_code" not in tables
+        finally:
+            await eng.dispose()
 
 
-class TestSpoolCodeTableConstraints:
-    @pytest.mark.asyncio
-    async def test_kind_check_constraint_rejects_unknown_kind(self, migrated_engine):
-        session_factory = async_sessionmaker(migrated_engine, expire_on_commit=False)
-        async with session_factory() as session:
-            spool = Spool(material="PLA")
-            session.add(spool)
-            await session.commit()
+class TestDropInterimSpoolCodeSchema:
+    """TEMPORARY (local-only) migration — these tests are stripped together
+    with the migration before the upstream PR."""
 
-            session.add(SpoolCode(spool_id=spool.id, code="12345678905", kind="bogus"))
-            with pytest.raises(IntegrityError):
-                await session.commit()
-
-    @pytest.mark.asyncio
-    async def test_kind_check_constraint_accepts_every_enum_value(self, migrated_engine):
-        session_factory = async_sessionmaker(migrated_engine, expire_on_commit=False)
-        async with session_factory() as session:
-            spool = Spool(material="PLA")
-            session.add(spool)
-            await session.commit()
-
-            for i, kind in enumerate(SpoolCodeKind):
-                session.add(SpoolCode(spool_id=spool.id, code=f"CODE{i}", kind=kind.value))
-            await session.commit()
-
-    @pytest.mark.asyncio
-    async def test_same_code_twice_on_one_spool_is_rejected(self, migrated_engine):
-        session_factory = async_sessionmaker(migrated_engine, expire_on_commit=False)
-        async with session_factory() as session:
-            spool = Spool(material="PLA")
-            session.add(spool)
-            await session.commit()
-
-            session.add(SpoolCode(spool_id=spool.id, code="12345678905", kind="gtin", is_primary=True))
-            await session.commit()
-            session.add(SpoolCode(spool_id=spool.id, code="12345678905", kind="gtin"))
-            with pytest.raises(IntegrityError):
-                await session.commit()
-
-    @pytest.mark.asyncio
-    async def test_same_code_on_two_spools_is_fine(self, migrated_engine):
-        """Two physical spools of the same product share a retail barcode —
-        uniqueness is per spool, not global."""
-        session_factory = async_sessionmaker(migrated_engine, expire_on_commit=False)
-        async with session_factory() as session:
-            a, b = Spool(material="PLA"), Spool(material="PLA")
-            session.add_all([a, b])
-            await session.commit()
-
-            session.add_all(
-                [
-                    SpoolCode(spool_id=a.id, code="12345678905", kind="gtin", is_primary=True),
-                    SpoolCode(spool_id=b.id, code="12345678905", kind="gtin", is_primary=True),
-                ]
+    async def _build_interim_schema(self, conn):
+        await conn.execute(
+            text("CREATE TABLE spool (id INTEGER PRIMARY KEY, material VARCHAR(50), barcode VARCHAR(64))")
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE spool_code (id INTEGER PRIMARY KEY, spool_id INTEGER, code VARCHAR(64), "
+                "kind VARCHAR(16), is_refill BOOLEAN, is_primary BOOLEAN)"
             )
-            await session.commit()
+        )
+        await _migrate_add_spool_code_columns(conn)
 
-
-class TestCodesEagerLoading:
-    @pytest.mark.asyncio
-    async def test_properties_readable_without_explicit_selectinload(self, migrated_engine):
-        """The exact failure class from PR #1895's fifth review: a route that
-        forgets selectinload(Spool.codes) lazily touches `codes` during
-        response serialization and dies with MissingGreenlet on an async
-        session. lazy="selectin" makes every plain query safe."""
-        session_factory = async_sessionmaker(migrated_engine, expire_on_commit=False)
-        async with session_factory() as session:
-            spool = Spool(material="PLA", barcode="36000291452")
-            session.add(spool)
-            await session.commit()
-            session.add_all(
-                [
-                    SpoolCode(spool_id=spool.id, code="36000291452", kind="gtin", is_primary=True),
-                    SpoolCode(spool_id=spool.id, code="6938936716785", kind="gtin", is_refill=True),
-                ]
+    async def test_routes_primary_codes_and_refill_flag(self, engine):
+        async with engine.begin() as conn:
+            await self._build_interim_schema(conn)
+            # Roll 1: scanned a GTIN, bought as refill. Its sibling rows
+            # include another package's SKU that must NOT be migrated.
+            await conn.execute(text("INSERT INTO spool (id, material, barcode) VALUES (1, 'PLA', '6938936716785')"))
+            await conn.execute(
+                text(
+                    "INSERT INTO spool_code (spool_id, code, kind, is_refill, is_primary) VALUES "
+                    "(1, '6938936716785', 'gtin', 1, 1), (1, 'OTHERSIZESKU', 'sku', 0, 0)"
+                )
             )
-            await session.commit()
-
-        async with session_factory() as session:
-            # A deliberately plain query — no .options() at all.
-            loaded = (await session.execute(select(Spool).where(Spool.id == spool.id))).scalar_one()
-            assert [c.code for c in loaded.linked_codes] == ["6938936716785"]
-            assert loaded.is_refill is False  # primary code isn't the refill one
-
-    @pytest.mark.asyncio
-    async def test_is_refill_true_when_primary_code_is_refill(self, migrated_engine):
-        session_factory = async_sessionmaker(migrated_engine, expire_on_commit=False)
-        async with session_factory() as session:
-            spool = Spool(material="PLA", barcode="6938936716785")
-            session.add(spool)
-            await session.commit()
-            session.add(
-                SpoolCode(spool_id=spool.id, code="6938936716785", kind="gtin", is_primary=True, is_refill=True)
+            # Roll 2: scanned an alphanumeric code (stored as sku kind).
+            await conn.execute(text("INSERT INTO spool (id, material, barcode) VALUES (2, 'PLA', 'ALZMNTABS01')"))
+            await conn.execute(
+                text(
+                    "INSERT INTO spool_code (spool_id, code, kind, is_refill, is_primary) VALUES "
+                    "(2, 'ALZMNTABS01', 'sku', 0, 1)"
+                )
             )
-            await session.commit()
+            # Roll 3: no codes at all — untouched.
+            await conn.execute(text("INSERT INTO spool (id, material) VALUES (3, 'PLA')"))
 
-        async with session_factory() as session:
-            loaded = (await session.execute(select(Spool).where(Spool.id == spool.id))).scalar_one()
-            assert loaded.is_refill is True
-            assert loaded.linked_codes == []
+            await _migrate_drop_interim_spool_code_schema(conn)
+
+            rows = (
+                await conn.execute(
+                    text("SELECT id, gtin_code, sku_code, other_code, bought_as_refill FROM spool ORDER BY id")
+                )
+            ).fetchall()
+            by_id = {r[0]: r for r in rows}
+            assert by_id[1][1] == "6938936716785"  # gtin routed
+            assert by_id[1][2] is None  # sibling SKU deliberately NOT migrated
+            assert bool(by_id[1][4]) is True  # refill flag carried
+            assert by_id[2][2] == "ALZMNTABS01"  # sku-candidate routed to sku_code
+            assert bool(by_id[2][4]) is False
+            assert by_id[3][1] is None and by_id[3][2] is None
+
+            # Interim schema gone.
+            tables = {
+                r[0] for r in (await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))).fetchall()
+            }
+            assert "spool_code" not in tables
+            assert "barcode" not in await _spool_columns(conn)
+
+    async def test_asin_barcode_routes_to_asin_code(self, engine):
+        async with engine.begin() as conn:
+            await self._build_interim_schema(conn)
+            await conn.execute(text("INSERT INTO spool (id, material, barcode) VALUES (1, 'PLA', 'B0CJLR62MF')"))
+            await conn.execute(
+                text(
+                    "INSERT INTO spool_code (spool_id, code, kind, is_refill, is_primary) VALUES "
+                    "(1, 'B0CJLR62MF', 'sku', 0, 1)"
+                )
+            )
+            await _migrate_drop_interim_spool_code_schema(conn)
+            row = (await conn.execute(text("SELECT asin_code, sku_code FROM spool WHERE id = 1"))).fetchone()
+            assert row[0] == "B0CJLR62MF"
+            assert row[1] is None
+
+    async def test_noop_without_interim_table(self, engine):
+        """A database that never ran the interim branch (fresh install, or
+        upstream once this migration is stripped) must pass through untouched."""
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE spool (id INTEGER PRIMARY KEY, material VARCHAR(50))"))
+            await _migrate_add_spool_code_columns(conn)
+            await _migrate_drop_interim_spool_code_schema(conn)  # must not raise
+            assert set(CODE_COLUMNS) <= await _spool_columns(conn)

@@ -1,16 +1,22 @@
-"""Schema validation tests for the spool `barcode` field.
+"""Schema validation tests for the typed spool code fields.
 
-Locks in the write-path canonicalization: a manually-typed barcode must
-normalize to the same digits-only, leading-zeros-stripped form the
-scan-to-add lookup already produces, so a later scan of the same physical
-barcode matches the stored spool via the barcode resolver's own-inventory
-check regardless of which UPC-A/EAN-13 form was typed or scanned.
+Locks in the write-path rules: `gtin_code` accepts only checksum-valid
+retail barcodes (canonicalized so a later scan matches the stored spool
+regardless of UPC-A/EAN-13 form), `asin_code` accepts 10-char ASINs,
+`sku_code` trims + uppercases verbatim, and `other_code` — the user's own
+code space — is stored trimmed with case preserved.
 """
 
 import pytest
 from pydantic import ValidationError
 
-from backend.app.schemas.spool import SpoolCreate, SpoolResponse, SpoolUpdate, classify_code, normalize_barcode
+from backend.app.schemas.spool import (
+    SpoolCreate,
+    SpoolResponse,
+    SpoolUpdate,
+    classify_code,
+    normalize_barcode,
+)
 
 
 class TestNormalizeBarcode:
@@ -56,6 +62,18 @@ class TestClassifyCode:
         # Right length (12 digits) but an invalid check digit.
         assert classify_code("099999999999") == ("99999999999", "sku")
 
+    def test_modern_asin_is_asin(self):
+        """B0 + 8 alphanumerics — the shape every filament ASIN in both
+        community databases matches (91 in SpoolmanDB, 7 in OFD, all B0…)."""
+        assert classify_code("B0CJLR62MF") == ("B0CJLR62MF", "asin")
+
+    def test_asin_is_case_normalized(self):
+        assert classify_code("b0cjlr62mf") == ("B0CJLR62MF", "asin")
+
+    def test_ten_char_non_b0_code_is_sku(self):
+        # 10 alphanumerics without the B0 prefix: SKU candidate, not ASIN.
+        assert classify_code("X0CJLR62MF") == ("X0CJLR62MF", "sku")
+
     def test_alphanumeric_code_is_sku(self):
         """A Code 128 manufacturer SKU/article number — e.g. Polymaker's
         inventory barcode with no UPC/EAN counterpart."""
@@ -67,19 +85,6 @@ class TestClassifyCode:
     def test_short_digit_string_below_floor_is_sku(self):
         assert classify_code("12345") == ("12345", "sku")
 
-    def test_kind_vocabulary_matches_spool_code_kind_enum(self):
-        """classify_code returns plain strings so the schema layer stays free
-        of ORM imports; this test is the lock that keeps those strings and the
-        SpoolCodeKind enum (which generates the DB CHECK constraint) from
-        drifting apart."""
-        from backend.app.models.spool_code import SpoolCodeKind
-
-        produced_kinds = {
-            classify_code("012345678905")[1],  # gtin
-            classify_code("ALZMNTABS01")[1],  # sku
-        }
-        assert produced_kinds == {k.value for k in SpoolCodeKind}
-
     def test_leading_zero_upc_a_still_classifies_gtin_after_stripping(self):
         """Regression for the exact bug found in PR #1895's review: a UPC-A
         with a leading zero must classify as gtin whether you feed it the raw
@@ -89,8 +94,8 @@ class TestClassifyCode:
         digit), so re-padding the stripped canonical form and checking there
         gives the same verdict the raw value would have."""
         raw = "036000291452"  # 12-digit UPC-A, one leading zero
-        stored = normalize_barcode(raw)  # what SpoolCreate/SpoolUpdate persist
-        assert stored == "36000291452"  # confirms the zero really is stripped
+        stored = normalize_barcode(raw)
+        assert stored == "36000291452"
         assert classify_code(raw) == ("36000291452", "gtin")
         assert classify_code(stored) == ("36000291452", "gtin")
 
@@ -105,6 +110,7 @@ class TestClassifyCode:
             "0000000000123456",  # heavily zero-padded, still within GTIN-14
             "ALZMNTABS01",
             "  alzmntabs01  ",
+            "B0CJLR62MF",
             "099999999999",
             "12345",
             "",
@@ -113,71 +119,108 @@ class TestClassifyCode:
             assert classify_code(raw) == classify_code(stored), raw
 
 
-class TestSpoolCreateBarcodeValidation:
+class TestGtinCodeValidation:
     def test_canonicalizes_on_create(self):
-        spool = SpoolCreate(material="PLA", barcode="0012345678905")
-        assert spool.barcode == "12345678905"
+        spool = SpoolCreate(material="PLA", gtin_code="0012345678905")
+        assert spool.gtin_code == "12345678905"
 
-    def test_accepts_null_barcode(self):
-        spool = SpoolCreate(material="PLA", barcode=None)
-        assert spool.barcode is None
+    def test_accepts_null(self):
+        spool = SpoolCreate(material="PLA", gtin_code=None)
+        assert spool.gtin_code is None
 
-    def test_blank_barcode_normalizes_to_none(self):
-        spool = SpoolCreate(material="PLA", barcode="")
-        assert spool.barcode is None
+    def test_blank_normalizes_to_none(self):
+        spool = SpoolCreate(material="PLA", gtin_code="")
+        assert spool.gtin_code is None
 
-    def test_sku_barcode_survives_create(self):
-        spool = SpoolCreate(material="PLA", barcode="ALZMNTABS01")
-        assert spool.barcode == "ALZMNTABS01"
-
-    def test_rejects_barcode_over_64_chars(self):
-        """Matches Spool.barcode's VARCHAR(64) — Postgres would reject or
-        truncate a longer value at the DB layer while SQLite silently accepts
-        it, so reject it up front for cross-dialect parity."""
+    def test_rejects_non_gtin_value(self):
+        """Only true retail barcodes belong in gtin_code — a SKU typed into
+        the field is rejected rather than silently reclassified."""
         with pytest.raises(ValidationError):
-            SpoolCreate(material="PLA", barcode="A" * 65)
+            SpoolCreate(material="PLA", gtin_code="ALZMNTABS01")
 
-    def test_accepts_barcode_at_64_char_boundary(self):
-        spool = SpoolCreate(material="PLA", barcode="A" * 64)
-        assert spool.barcode == "A" * 64
+    def test_rejects_bad_checksum(self):
+        with pytest.raises(ValidationError):
+            SpoolCreate(material="PLA", gtin_code="099999999999")
 
-    def test_barcode_is_refill_defaults_false(self):
-        spool = SpoolCreate(material="PLA", barcode="0012345678905")
-        assert spool.barcode_is_refill is False
-
-    def test_barcode_is_refill_is_write_only(self):
-        """The refill flag lives on the barcode's SpoolCode row, not on Spool —
-        it must exist on SpoolCreate (the write path pops it before building
-        the ORM object) and must NOT leak onto SpoolUpdate or SpoolResponse's
-        input surface as a settable Spool attribute."""
-        assert "barcode_is_refill" in SpoolCreate.model_fields
-        assert "barcode_is_refill" not in SpoolUpdate.model_fields
-
-
-class TestSpoolUpdateBarcodeValidation:
     def test_canonicalizes_on_update(self):
-        update = SpoolUpdate(barcode="0012345678905")
-        assert update.barcode == "12345678905"
+        update = SpoolUpdate(gtin_code="0012345678905")
+        assert update.gtin_code == "12345678905"
 
-    def test_unset_barcode_stays_unset(self):
+    def test_unset_stays_unset_on_update(self):
         update = SpoolUpdate()
-        assert "barcode" not in update.model_fields_set
+        assert "gtin_code" not in update.model_fields_set
 
-    def test_rejects_barcode_over_64_chars(self):
+
+class TestAsinCodeValidation:
+    def test_uppercases(self):
+        spool = SpoolCreate(material="PLA", asin_code="b0cjlr62mf")
+        assert spool.asin_code == "B0CJLR62MF"
+
+    def test_rejects_wrong_length(self):
         with pytest.raises(ValidationError):
-            SpoolUpdate(barcode="A" * 65)
+            SpoolCreate(material="PLA", asin_code="B0SHORT")
+
+    def test_blank_normalizes_to_none(self):
+        spool = SpoolCreate(material="PLA", asin_code="  ")
+        assert spool.asin_code is None
 
 
-class TestSpoolResponseBarcodeUnconstrained:
-    def test_legacy_over_length_barcode_does_not_500(self):
-        """rgba already has this same escape hatch (#1055) — a barcode written
-        past the 64-char cap (SQLite doesn't enforce VARCHAR length) must
-        still read back instead of 500ing the whole inventory list."""
+class TestSkuCodeValidation:
+    def test_trims_and_uppercases(self):
+        spool = SpoolCreate(material="PLA", sku_code="  alzmntabs01  ")
+        assert spool.sku_code == "ALZMNTABS01"
+
+    def test_numeric_sku_is_not_gtin_canonicalized(self):
+        """A numeric article number like Bambu's 17600 must store byte-for-byte
+        as printed — no leading-zero stripping games."""
+        spool = SpoolCreate(material="PLA", sku_code="17600")
+        assert spool.sku_code == "17600"
+
+    def test_rejects_over_64_chars(self):
+        with pytest.raises(ValidationError):
+            SpoolCreate(material="PLA", sku_code="A" * 65)
+
+
+class TestOtherCodeValidation:
+    def test_trims_but_preserves_case(self):
+        """other_code is the user's own code space (self-printed barcodes
+        welcome) — no case or format rules are imposed."""
+        spool = SpoolCreate(material="PLA", other_code="  MyShelf-a42  ")
+        assert spool.other_code == "MyShelf-a42"
+
+    def test_blank_normalizes_to_none(self):
+        spool = SpoolCreate(material="PLA", other_code="   ")
+        assert spool.other_code is None
+
+
+class TestBoughtAsRefillAndScannedCode:
+    def test_bought_as_refill_defaults_false(self):
+        spool = SpoolCreate(material="PLA")
+        assert spool.bought_as_refill is False
+
+    def test_scanned_code_is_create_only(self):
+        """scanned_code is the write-only raw-scan hint the create route
+        classifies and routes — it must not exist on SpoolUpdate (edits work
+        on the explicit typed fields)."""
+        assert "scanned_code" in SpoolCreate.model_fields
+        assert "scanned_code" not in SpoolUpdate.model_fields
+
+    def test_bought_as_refill_updatable(self):
+        update = SpoolUpdate(bought_as_refill=True)
+        assert update.bought_as_refill is True
+
+
+class TestSpoolResponseCodesUnconstrained:
+    def test_legacy_invalid_values_do_not_500(self):
+        """rgba already has this same escape hatch (#1055) — a code written
+        past validation (SQLite doesn't enforce VARCHAR length or our format
+        rules) must still read back instead of 500ing the inventory list."""
         response = SpoolResponse.model_validate(
             {
                 "id": 1,
                 "material": "PLA",
-                "barcode": "A" * 100,
+                "gtin_code": "A" * 100,  # not even a GTIN — must still load
+                "asin_code": "not-an-asin",
                 "label_weight": 1000,
                 "core_weight": 250,
                 "weight_used": 0,
@@ -185,4 +228,6 @@ class TestSpoolResponseBarcodeUnconstrained:
                 "updated_at": "2026-01-01T00:00:00",
             }
         )
-        assert response.barcode == "A" * 100
+        assert response.gtin_code == "A" * 100
+        assert response.asin_code == "not-an-asin"
+        assert response.bought_as_refill is False

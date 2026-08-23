@@ -856,52 +856,49 @@ class SpoolmanClient:
                         return spool
         return None
 
-    async def find_spool_by_barcode(self, barcode: str, cached_spools: list[dict] | None = None) -> dict | None:
-        """Return the spool matching the given canonical GTIN or SKU code, or None if not found.
+    # The extra keys a scanned code can match against: the typed code fields
+    # (see spoolman_inventory.py's writes) plus the interim branch's single
+    # bambu_barcode key, read-tolerated so pre-migration spools still resolve.
+    _CODE_EXTRA_KEYS = (
+        "bambu_gtin_code",
+        "bambu_sku_code",
+        "bambu_asin_code",
+        "bambu_other_code",
+        "bambu_barcode",
+    )
 
-        Spoolman has no native barcode field, so the value is stored JSON-encoded
-        under extra.bambu_barcode (same pattern as extra.tag for RFID). Also
-        matches against extra.bambu_linked_codes — the sibling GTIN/SKU codes
-        cross-referenced from OFD/SpoolmanDB-Community at scan time (see the
-        Spoolman-mode writes in `spoolman_inventory.py`) — so a later scan of
-        any sibling code (another package-size GTIN, the refill GTIN, the
-        manufacturer SKU) resolves to this spool too, not just the exact code
-        originally scanned. Searches archived spools too, so a repeat scan
+    async def find_spool_by_barcode(self, barcode: str, cached_spools: list[dict] | None = None) -> dict | None:
+        """Return the spool matching the given code, or None if not found.
+
+        Spoolman has no native code fields, so values are stored JSON-encoded
+        under the extra keys in ``_CODE_EXTRA_KEYS`` (same pattern as
+        extra.tag for RFID) — whichever typed column the code lives in, the
+        same string matches. Searches archived spools too, so a repeat scan
         resolves even if the original spool was later archived — matching the
-        local-inventory barcode lookup's behavior. When more than one spool
-        carries the same code, the most recently registered one wins.
+        local-inventory lookup's behavior. When more than one spool carries
+        the same code, the most recently registered one wins.
         """
         spools = cached_spools if cached_spools is not None else await self.get_all_spools(allow_archived=True)
         matches: list[dict] = []
         for spool in spools:
             extra = spool.get("extra") or {}
-            raw = extra.get("bambu_barcode")
-            stored: object = None
-            if isinstance(raw, str) and raw:
-                try:
-                    stored = json.loads(raw)
-                except (json.JSONDecodeError, ValueError):
-                    stored = raw
-                # Our writers always json.dumps a string, but a hand-edited
-                # extra field holding a bare digit string (e.g. 6938936716785,
-                # unquoted) json-decodes to an int — coerce it back so the
-                # spool still matches instead of silently never resolving.
-                if isinstance(stored, int) and not isinstance(stored, bool):
-                    stored = str(stored)
-            if isinstance(stored, str) and stored == barcode:
-                matches.append(spool)
-                continue
-
-            raw_linked = extra.get("bambu_linked_codes")
-            if isinstance(raw_linked, str) and raw_linked:
-                try:
-                    linked = json.loads(raw_linked)
-                except (json.JSONDecodeError, ValueError):
-                    linked = None
-                if isinstance(linked, list) and any(
-                    isinstance(item, dict) and item.get("code") == barcode for item in linked
-                ):
+            for key in self._CODE_EXTRA_KEYS:
+                raw = extra.get(key)
+                stored: object = None
+                if isinstance(raw, str) and raw:
+                    try:
+                        stored = json.loads(raw)
+                    except (json.JSONDecodeError, ValueError):
+                        stored = raw
+                    # Our writers always json.dumps a string, but a hand-edited
+                    # extra field holding a bare digit string (e.g. 6938936716785,
+                    # unquoted) json-decodes to an int — coerce it back so the
+                    # spool still matches instead of silently never resolving.
+                    if isinstance(stored, int) and not isinstance(stored, bool):
+                        stored = str(stored)
+                if isinstance(stored, str) and stored == barcode:
                     matches.append(spool)
+                    break
 
         if not matches:
             return None

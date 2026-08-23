@@ -55,9 +55,12 @@ class MappedSpoolFields(TypedDict):
     storage_location: str | None
     location_id: int | None
     k_profiles: list[Any]
-    barcode: str | None
+    gtin_code: str | None
+    asin_code: str | None
+    sku_code: str | None
+    other_code: str | None
+    bought_as_refill: bool
     linked_codes: list[dict[str, Any]]
-    is_refill: bool
 
 
 class NormalizedVendorRef(TypedDict):
@@ -154,35 +157,6 @@ def _extract_extra_str(extra: dict, key: str) -> str:
         # Tolerate bare-string values written without JSON encoding.
         return raw
     return decoded if isinstance(decoded, str) else ""
-
-
-def _extract_linked_codes(extra: dict, primary_barcode: str | None) -> list[dict[str, Any]]:
-    """Extract the sibling GTIN/SKU codes stored under extra.bambu_linked_codes.
-
-    Stored as a JSON-encoded list of ``{"code", "kind", "is_refill"}`` dicts
-    (same shape as ``SpoolCode`` rows in the local-DB inventory mode — see
-    ``persist_barcode_codes_for_spool`` in ``services/barcode_resolver.py``).
-    Excludes `primary_barcode` itself since that's already shown via the
-    `barcode` field. Tolerates missing/malformed data (returns []).
-    """
-    raw = extra.get("bambu_linked_codes")
-    if not isinstance(raw, str) or not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        return []
-    if not isinstance(parsed, list):
-        return []
-    result: list[dict[str, Any]] = []
-    for item in parsed:
-        if not isinstance(item, dict):
-            continue
-        code = item.get("code")
-        if not isinstance(code, str) or not code or code == primary_barcode:
-            continue
-        result.append({"code": code, "kind": item.get("kind") or "gtin", "is_refill": bool(item.get("is_refill"))})
-    return result
 
 
 def _map_spoolman_spool(spool: dict) -> MappedSpoolFields:
@@ -290,19 +264,47 @@ def _map_spoolman_spool(spool: dict) -> MappedSpoolFields:
     nozzle_temp_raw = filament.get("settings_extruder_temp")
     nozzle_temp_min: int | None = _safe_int(nozzle_temp_raw, 0) or None
 
-    # Refill flag: persisted under spool.extra.bambu_barcode_is_refill as a
-    # JSON-encoded bool ("true"/"false"), same pattern as the other bambu_*
-    # fields.
-    raw_is_refill = extra.get("bambu_barcode_is_refill")
+    # Purchase-form flag: persisted under spool.extra.bambu_bought_as_refill
+    # as a JSON-encoded bool, same pattern as the other bambu_* fields. Falls
+    # back to the interim branch's bambu_barcode_is_refill key on old data.
+    raw_is_refill = extra.get("bambu_bought_as_refill")
+    if raw_is_refill is None:
+        raw_is_refill = extra.get("bambu_barcode_is_refill")
     if isinstance(raw_is_refill, bool):
-        spool_is_refill = raw_is_refill
+        bought_as_refill = raw_is_refill
     elif isinstance(raw_is_refill, str):
         try:
-            spool_is_refill = bool(json.loads(raw_is_refill))
+            bought_as_refill = bool(json.loads(raw_is_refill))
         except (ValueError, TypeError):
-            spool_is_refill = raw_is_refill.strip().lower() in ("true", "1")
+            bought_as_refill = raw_is_refill.strip().lower() in ("true", "1")
     else:
-        spool_is_refill = False
+        bought_as_refill = False
+
+    # Typed code fields, with a read-tolerant fallback for the interim
+    # branch's single bambu_barcode extra: its value could be either kind, so
+    # classify it into the right typed slot rather than assuming GTIN.
+    gtin_code = _extract_extra_str(extra, "bambu_gtin_code") or None
+    asin_code = _extract_extra_str(extra, "bambu_asin_code") or None
+    sku_code = _extract_extra_str(extra, "bambu_sku_code") or None
+    other_code = _extract_extra_str(extra, "bambu_other_code") or None
+    legacy_barcode = _extract_extra_str(extra, "bambu_barcode") or None
+    if legacy_barcode and not any((gtin_code, asin_code, sku_code, other_code)):
+        from backend.app.schemas.spool import classify_code
+
+        _, legacy_kind = classify_code(legacy_barcode)
+        if legacy_kind == "gtin":
+            gtin_code = legacy_barcode
+        elif legacy_kind == "asin":
+            asin_code = legacy_barcode
+        else:
+            sku_code = legacy_barcode
+
+    spool_codes: list[dict[str, Any]] = []
+    if gtin_code:
+        spool_codes.append({"code": gtin_code, "kind": "gtin", "is_refill": bought_as_refill})
+    for value in (sku_code, asin_code, other_code):
+        if value:
+            spool_codes.append({"code": value, "kind": "sku", "is_refill": bought_as_refill})
 
     return {
         "id": spool_id,
@@ -311,11 +313,14 @@ def _map_spoolman_spool(spool: dict) -> MappedSpoolFields:
         "color_name": color_name,
         "color_name_is_synthesized": color_name_is_synthesized,
         "rgba": rgba,
-        # Spoolman has no native barcode field — persisted under
-        # spool.extra.bambu_barcode (JSON-encoded string), same pattern as
+        # Spoolman has no native code fields — persisted under the
+        # spool.extra bambu_* keys (JSON-encoded strings), same pattern as
         # bambu_slicer_filament/bambu_color_name.
-        "barcode": (_extract_extra_str(extra, "bambu_barcode") or None),
-        "is_refill": spool_is_refill,
+        "gtin_code": gtin_code,
+        "asin_code": asin_code,
+        "sku_code": sku_code,
+        "other_code": other_code,
+        "bought_as_refill": bought_as_refill,
         "brand": vendor.get("name") or None,
         "label_weight": label_weight,
         "core_weight": _safe_int(
@@ -354,5 +359,7 @@ def _map_spoolman_spool(spool: dict) -> MappedSpoolFields:
         "storage_location": spool.get("location") or None,
         "location_id": None,
         "k_profiles": [],
-        "linked_codes": _extract_linked_codes(extra, _extract_extra_str(extra, "bambu_barcode") or None),
+        # The spool's own stored codes in lookup shape — feeds the Spoolman
+        # branch of resolve_barcode (its inventory-hit "all_codes").
+        "linked_codes": spool_codes,
     }

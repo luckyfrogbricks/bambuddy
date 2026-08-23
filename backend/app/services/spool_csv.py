@@ -33,16 +33,13 @@ from backend.app.schemas.spool import SpoolCreate
 # import — `weight_used` is the source of truth, and accepting both would let
 # them contradict. `last_used` is a timestamp the model carries but SpoolCreate
 # does not, so import applies it to the ORM object directly (see persist path).
-# `storage_location`, `category`, `low_stock_threshold_pct` and `barcode` are
-# SpoolCreate fields included so a round-trip preserves them (they'd otherwise
-# be lost). `barcode` is canonicalized by SpoolCreate's validator on import
-# (digits only, leading zeros stripped) same as a manual form edit, so a
-# re-imported spool still resolves on a future scan-to-add lookup. Only the
-# primary barcode round-trips this way — sibling SpoolCode rows (other
-# GTIN/SKU forms cross-referenced from external databases) are not exported
-# and are simply re-derived from the primary barcode on import, same as any
-# other create path. Intentional: they're a cache of external lookups, not
-# user data.
+# `storage_location`, `category`, `low_stock_threshold_pct` and the typed
+# code columns (`gtin_code`/`asin_code`/`sku_code`/`other_code`, plus
+# `bought_as_refill`) are SpoolCreate fields included so a round-trip
+# preserves them. Each code column is validated/canonicalized by SpoolCreate's
+# validators on import (gtin_code checksum-checked, sku/asin trimmed+upper,
+# other_code trimmed verbatim) same as a manual form edit, so a re-imported
+# spool still resolves on a future scan-to-add lookup.
 CSV_COLUMNS = [
     "material",
     "brand",
@@ -62,7 +59,11 @@ CSV_COLUMNS = [
     "storage_location",
     "category",
     "low_stock_threshold_pct",
-    "barcode",
+    "gtin_code",
+    "asin_code",
+    "sku_code",
+    "other_code",
+    "bought_as_refill",
 ]
 
 # Upload ceiling for the import endpoint. A spool inventory CSV is a few KB
@@ -361,12 +362,35 @@ async def parse_and_validate(raw_bytes: bytes, db: AsyncSession) -> ImportPrevie
 
         # Plain text passthrough columns. `cell()` returns "" when the column
         # is absent from the uploaded file's header (see `col_index` above),
-        # so an import missing e.g. `barcode` entirely just falls through to
+        # so an import missing e.g. `gtin_code` entirely just falls through to
         # SpoolCreate's default (None) — same as any other omitted column.
-        for field in ("subtype", "effect_type", "extra_colors", "note", "storage_location", "category", "barcode"):
+        # An invalid gtin_code/asin_code raises in SpoolCreate's validators
+        # and surfaces as a row error like any other malformed column.
+        for field in (
+            "subtype",
+            "effect_type",
+            "extra_colors",
+            "note",
+            "storage_location",
+            "category",
+            "gtin_code",
+            "asin_code",
+            "sku_code",
+            "other_code",
+        ):
             value = cell(raw_row, field)
             if value:
                 data[field] = value
+
+        # bought_as_refill: boolean column ("true"/"false", "1"/"0", "yes"/"no").
+        refill_value = cell(raw_row, "bought_as_refill").strip().lower()
+        if refill_value:
+            if refill_value in ("true", "1", "yes"):
+                data["bought_as_refill"] = True
+            elif refill_value in ("false", "0", "no"):
+                data["bought_as_refill"] = False
+            else:
+                row_error = f"bought_as_refill must be true/false (got '{refill_value}')"
 
         # Numeric columns: parse only if present, else leave to schema defaults.
         for field in _INT_COLUMNS:
@@ -466,33 +490,12 @@ async def parse_and_validate(raw_bytes: bytes, db: AsyncSession) -> ImportPrevie
             error += 1
             continue
 
-        # normalize_barcode() silently returns None for a cell that has no
-        # digits and no letters (e.g. "---" or "***") — SpoolCreate treats
-        # that as a perfectly valid "no barcode", so it wouldn't raise above.
-        # Surface it as a row error instead of silently dropping data the
-        # user explicitly typed, matching how every other malformed column
-        # (rgba, last_used, the numeric fields) is already handled.
-        raw_barcode = data.get("barcode")
-        if raw_barcode and spool.barcode is None:
-            rows.append(
-                ImportRowResult(
-                    row_number=row_number,
-                    status="error",
-                    reason=f"barcode has no usable digits or letters (got '{raw_barcode}')",
-                    material=material,
-                    brand=brand,
-                    color_name=color_name,
-                )
-            )
-            error += 1
-            continue
-
         spool_data = spool.model_dump()
-        # `barcode_is_refill` is a write-only SpoolCreate hint, not a Spool
-        # column — the import endpoint builds the ORM object via `Spool(**spool)`,
-        # so it must not leak into the persisted dict. The CSV has no refill
-        # column anyway, so it's always the default here.
-        spool_data.pop("barcode_is_refill", None)
+        # `scanned_code` is a write-only SpoolCreate hint, not a Spool column —
+        # the import endpoint builds the ORM object via `Spool(**spool)`, so
+        # it must not leak into the persisted dict. The CSV carries the typed
+        # code columns directly, so it's always the default (None) here.
+        spool_data.pop("scanned_code", None)
         if last_used is not None:
             # last_used isn't a SpoolCreate field; graft it onto the persisted
             # dict so the ORM object carries it.
