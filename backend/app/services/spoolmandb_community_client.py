@@ -211,7 +211,21 @@ def _parse_tarball(raw: bytes) -> list[dict]:
             if not manufacturer or not isinstance(manufacturer, str):
                 continue
             variants.extend(_parse_manufacturer_file(manufacturer, data))
-    return variants
+    return _dedupe_variants(variants)
+
+
+def _dedupe_variants(variants: list[dict]) -> list[dict]:
+    """Drop byte-identical variants — upstream lists some colors twice (the
+    2026-08 snapshot carried 33 exact duplicates), which surfaced as
+    indistinguishable twin rows in catalog search."""
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for variant in variants:
+        key = json.dumps(variant, sort_keys=True, ensure_ascii=False)
+        if key not in seen:
+            seen.add(key)
+            unique.append(variant)
+    return unique
 
 
 def codes_for_variant(variant: dict) -> list[dict]:

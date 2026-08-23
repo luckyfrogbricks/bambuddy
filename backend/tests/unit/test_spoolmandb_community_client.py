@@ -311,6 +311,23 @@ class TestParseTarball:
         variants = smdb._parse_tarball(tarball)
         assert {v["manufacturer"] for v in variants} == {"A Co", "B Co"}
 
+    def test_exact_duplicate_variants_deduped(self):
+        """Upstream lists some colors twice (33 exact duplicates in the
+        2026-08 snapshot) — identical variants surfaced as indistinguishable
+        twin rows in catalog search."""
+        content = json.dumps(
+            {
+                "manufacturer": "A Co",
+                "filaments": [
+                    {"name": "Dup", "material": "PLA", "colors": [{"name": "Red", "eans": ["1111111111111"]}]},
+                    {"name": "Dup", "material": "PLA", "colors": [{"name": "Red", "eans": ["1111111111111"]}]},
+                ],
+            }
+        ).encode()
+        tarball = _build_tarball({"SpoolmanDB-Community-main/filaments/a.json": content})
+        variants = smdb._parse_tarball(tarball)
+        assert len(variants) == 1
+
     def test_non_filaments_paths_skipped(self):
         """Only filaments/*.json source files are catalog data — READMEs,
         compiled output, and files elsewhere in the repo must not be parsed."""
