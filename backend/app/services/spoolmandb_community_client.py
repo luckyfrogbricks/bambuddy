@@ -147,16 +147,19 @@ def _parse_manufacturer_file(manufacturer: str, data: dict) -> list[dict]:
             # renderer (FilamentSwatch checkerboard, kiosk glass treatment)
             # can show it — upstream publishes translucent colors fully
             # opaque. Two cases:
-            #   - a colorless "Clear"/"Transparent" published as opaque BLACK
-            #     (Bambu PETG Translucent Clear = 000000FF upstream) becomes
-            #     near-invisible white — without this a clear spool renders
-            #     as solid black;
-            #   - any other translucent color keeps its RGB at half alpha.
-            if rgba and translucent and rgba.upper().endswith("FF"):
-                if (color_name or "").strip().lower() in ("clear", "transparent") and rgba[:6] == "000000":
-                    rgba = "FFFFFF40"
-                else:
-                    rgba = rgba[:6] + "80"
+            #   - a color named EXACTLY "Clear"/"Transparent" but published as
+            #     opaque BLACK is a data mistake a handful of manufacturer
+            #     files make (Bambu's PETG Translucent Clear = 000000FF, plus
+            #     a few flag-less "Transparent" entries) — it becomes
+            #     near-invisible white. Exact-name matching keeps genuinely
+            #     smoky filaments untouched: those always carry "Black" in
+            #     the name ("Translucent Smoke Black", "Clear Black", …);
+            #   - any other translucent-flagged color keeps its RGB at half
+            #     alpha.
+            if rgba and (color_name or "").strip().lower() in ("clear", "transparent") and rgba[:6] == "000000":
+                rgba = "FFFFFF40"
+            elif rgba and translucent and rgba.upper().endswith("FF"):
+                rgba = rgba[:6] + "80"
 
             variants.append(
                 {

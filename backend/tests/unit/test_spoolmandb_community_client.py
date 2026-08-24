@@ -528,6 +528,27 @@ class TestTranslucentAlpha:
         v = next(v for v in variants if v["color_name"] == "Black")
         assert v["rgba"] == "000000FF"
 
+    def test_flagless_black_transparent_also_corrected(self):
+        # A few files publish a color named exactly "Transparent" as opaque
+        # black WITHOUT the translucent flag — same colorless intent.
+        file = {
+            "manufacturer": "PrintOnion",
+            "filaments": [
+                {
+                    "material": "PETG",
+                    "name": "PETG {color_name}",
+                    "colors": [
+                        {"name": "Transparent", "hex": "#000000"},
+                        # "Black" in the name = genuinely smoky, stays black.
+                        {"name": "Transparent Black", "hex": "#000000"},
+                    ],
+                },
+            ],
+        }
+        variants = smdb._parse_manufacturer_file("PrintOnion", file)
+        assert next(v for v in variants if v["color_name"] == "Transparent")["rgba"] == "FFFFFF40"
+        assert next(v for v in variants if v["color_name"] == "Transparent Black")["rgba"] == "000000FF"
+
     def test_per_color_flag_wins(self):
         variants = smdb._parse_manufacturer_file("Bambu Lab", self.FILE)
         v = next(v for v in variants if v["color_name"] == "Smoke")
