@@ -6,6 +6,7 @@ import { spoolbuddyApi } from '../../api/client';
 import { SpoolIcon } from './SpoolIcon';
 import { spoolColorString } from '../../utils/colors';
 import { effectiveCoreWeight } from './coreWeight';
+import { materialLine } from '../../utils/materialLine';
 
 interface TagDetectedModalProps {
   isOpen: boolean;
@@ -178,8 +179,7 @@ function KnownSpoolView({ spool, scaleWeight, weightStable, syncing, synced, onS
             <span className="text-xs font-mono text-zinc-500 shrink-0">#{spool.id}</span>
           </div>
           <p className="text-sm text-zinc-400">
-            {spool.brand} &bull; {spool.material}
-            {spool.subtype && ` ${spool.subtype}`}
+            {spool.brand} &bull; {materialLine(spool.material, spool.subtype)}
           </p>
 
           {remaining !== null && (

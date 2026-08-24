@@ -12,6 +12,7 @@ import { InventorySpoolInfoCard } from '../../components/spoolbuddy/InventorySpo
 import { AssignToAmsModal } from '../../components/spoolbuddy/AssignToAmsModal';
 import type { SpoolBuddyOutletContext } from '../../components/spoolbuddy/SpoolBuddyLayout';
 import { useToast } from '../../contexts/ToastContext';
+import { materialLine } from '../../utils/materialLine';
 
 type SlotInfo = { ams_id: number; tray_id: number; printer_name?: string | null };
 
@@ -31,9 +32,7 @@ function spoolPct(spool: InventorySpool): number {
 }
 
 function spoolDisplayName(spool: InventorySpool): string {
-  const parts = [spool.material];
-  if (spool.subtype) parts.push(spool.subtype);
-  return parts.join(' ');
+  return materialLine(spool.material, spool.subtype);
 }
 
 function assignmentLabel(a: SlotInfo): string {

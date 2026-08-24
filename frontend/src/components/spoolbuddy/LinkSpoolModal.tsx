@@ -4,6 +4,7 @@ import { X } from 'lucide-react';
 import type { InventorySpool } from '../../api/client';
 import { SpoolIcon } from './SpoolIcon';
 import { spoolColorString } from '../../utils/colors';
+import { materialLine } from '../../utils/materialLine';
 
 interface LinkSpoolModalProps {
   isOpen: boolean;
@@ -113,8 +114,7 @@ export function LinkSpoolModal({
                       <span className="text-[10px] font-mono text-zinc-500 shrink-0">#{spool.id}</span>
                     </div>
                     <div className="text-sm text-zinc-400 truncate">
-                      {spool.brand} &bull; {spool.material}
-                      {spool.subtype && ` ${spool.subtype}`}
+                      {spool.brand} &bull; {materialLine(spool.material, spool.subtype)}
                     </div>
                   </div>
                   <div className="text-sm font-mono text-zinc-500">

@@ -8,6 +8,7 @@ import { SpoolIcon } from './SpoolIcon';
 import { ScanHint } from './ScanHint';
 import { spoolColorString } from '../../utils/colors';
 import { effectiveCoreWeight } from './coreWeight';
+import { materialLine } from '../../utils/materialLine';
 
 // Storage key for default core weight
 const DEFAULT_CORE_WEIGHT_KEY = 'spoolbuddy-default-core-weight';
@@ -111,8 +112,7 @@ export function SpoolInfoCard({ spool, scaleWeight, onClose, onSyncWeight, onAss
             {spool.bought_as_refill && <RefillBadge className="shrink-0" />}
           </div>
           <p className="text-sm text-zinc-400">
-            {spool.brand} &bull; {spool.material}
-            {spool.subtype && ` ${spool.subtype}`}
+            {spool.brand} &bull; {materialLine(spool.material, spool.subtype)}
           </p>
 
           {/* Filament remaining - big number */}
