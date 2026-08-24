@@ -361,7 +361,9 @@ export function SpoolFormModal({
           extra_colors: spool.extra_colors || '',
           effect_type: spool.effect_type || '',
           label_weight: spool.label_weight || 1000,
-          core_weight: spool.core_weight || 250,
+          // ?? not ||: a refill's core_weight of 0 is real — the || form
+          // silently turned an edited refill into a 250g-core spool.
+          core_weight: spool.core_weight ?? 250,
           core_weight_catalog_id: spool.core_weight_catalog_id ?? null,
           weight_used: isCopying ? 0 : spool.weight_used || 0,
           slicer_filament: spool.slicer_filament || '',

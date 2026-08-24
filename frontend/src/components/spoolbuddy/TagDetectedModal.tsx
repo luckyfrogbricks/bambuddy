@@ -5,22 +5,7 @@ import type { MatchedSpool } from '../../hooks/useSpoolBuddyState';
 import { spoolbuddyApi } from '../../api/client';
 import { SpoolIcon } from './SpoolIcon';
 import { spoolColorString } from '../../utils/colors';
-
-// Storage key for default core weight (shared with SpoolInfoCard)
-const DEFAULT_CORE_WEIGHT_KEY = 'spoolbuddy-default-core-weight';
-
-function getDefaultCoreWeight(): number {
-  try {
-    const stored = localStorage.getItem(DEFAULT_CORE_WEIGHT_KEY);
-    if (stored) {
-      const weight = parseInt(stored, 10);
-      if (weight >= 0 && weight <= 500) return weight;
-    }
-  } catch {
-    // Ignore errors
-  }
-  return 250;
-}
+import { effectiveCoreWeight } from './coreWeight';
 
 interface TagDetectedModalProps {
   isOpen: boolean;
@@ -137,9 +122,7 @@ function KnownSpoolView({ spool, scaleWeight, weightStable, syncing, synced, onS
   const { t } = useTranslation();
   const colorHex = spoolColorString(spool.rgba);
 
-  const coreWeight = (spool.core_weight && spool.core_weight > 0)
-    ? spool.core_weight
-    : getDefaultCoreWeight();
+  const coreWeight = effectiveCoreWeight(spool);
 
   const grossWeight = scaleWeight !== null
     ? Math.round(Math.max(0, scaleWeight))

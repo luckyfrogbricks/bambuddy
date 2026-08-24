@@ -51,6 +51,21 @@ describe('SpoolInfoCard', () => {
     expect(circle).toBeInTheDocument();
   });
 
+  it('a refill (core_weight 0) never falls back to the default core', () => {
+    // BUG fix: core_weight=0 is REAL for a refill — the old (core && core > 0)
+    // guard treated it as unset and subtracted a phantom 250g spool, so a
+    // fresh 1071g refill displayed as 821g remaining.
+    const refill: MatchedSpool = {
+      ...mockSpool,
+      core_weight: 0,
+      bought_as_refill: true,
+    } as MatchedSpool;
+    render(<SpoolInfoCard spool={refill} scaleWeight={1071} />);
+
+    expect(screen.getByText('0g')).toBeInTheDocument(); // Core row shows the real 0
+    expect(screen.getAllByText('1071g').length).toBeGreaterThanOrEqual(2); // hero remaining AND gross row — no phantom spool
+  });
+
   it('shows remaining weight and fill percentage', () => {
     // scaleWeight=900g, core=250g → remaining = 900-250 = 650g
     // fillPercent = round(650/1000 * 100) = 65%

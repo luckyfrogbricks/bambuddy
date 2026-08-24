@@ -7,6 +7,7 @@ import { RefillBadge } from '../RefillBadge';
 import { SpoolIcon } from './SpoolIcon';
 import { ScanHint } from './ScanHint';
 import { spoolColorString } from '../../utils/colors';
+import { effectiveCoreWeight } from './coreWeight';
 
 // Storage key for default core weight
 const DEFAULT_CORE_WEIGHT_KEY = 'spoolbuddy-default-core-weight';
@@ -42,9 +43,7 @@ export function SpoolInfoCard({ spool, scaleWeight, onClose, onSyncWeight, onAss
   const colorHex = spoolColorString(spool.rgba);
 
   // Use spool's core_weight if set, otherwise fall back to default
-  const coreWeight = (spool.core_weight && spool.core_weight > 0)
-    ? spool.core_weight
-    : getDefaultCoreWeight();
+  const coreWeight = effectiveCoreWeight(spool);
 
   // Gross weight from scale (live) or fallback
   const grossWeight = scaleWeight !== null
