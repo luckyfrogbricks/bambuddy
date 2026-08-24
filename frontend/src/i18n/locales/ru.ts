@@ -6361,6 +6361,8 @@ export default {
       brand: "Бренд",
       color: "Цвет",
       coreWeight: "Сердечник",
+      closingIn: 'Закрытие через {{count}}…',
+      cancelAutoClose: 'Отменить автозакрытие',
       labelWeight: "По этикетке",
       scaleWeight: "По весам",
       netWeight: "Нетто",

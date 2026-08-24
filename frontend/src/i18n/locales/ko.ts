@@ -6373,6 +6373,8 @@ export default {
       brand: '브랜드',
       color: '색상',
       coreWeight: '코어',
+      closingIn: '{{count}}초 후 닫힘…',
+      cancelAutoClose: '자동 닫기 취소',
       labelWeight: '라벨',
       scaleWeight: '저울',
       netWeight: '순 무게',

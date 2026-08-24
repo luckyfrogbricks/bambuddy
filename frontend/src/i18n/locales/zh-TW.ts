@@ -6714,6 +6714,8 @@ export default {
       brand: '品牌',
       color: '顏色',
       coreWeight: '軸心重',
+      closingIn: '{{count}} 秒後關閉…',
+      cancelAutoClose: '取消自動關閉',
       labelWeight: '標籤重',
       scaleWeight: '磅秤重',
       netWeight: '淨重',

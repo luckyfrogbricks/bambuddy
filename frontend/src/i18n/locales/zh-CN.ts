@@ -6714,6 +6714,8 @@ export default {
       brand: '品牌',
       color: '颜色',
       coreWeight: '空盘',
+      closingIn: '{{count}} 秒后关闭…',
+      cancelAutoClose: '取消自动关闭',
       labelWeight: '标签',
       scaleWeight: '秤重',
       netWeight: '净重',

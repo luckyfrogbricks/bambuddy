@@ -6670,6 +6670,8 @@ export default {
       brand: 'Marka',
       color: 'Renk',
       coreWeight: 'Çekirdek',
+      closingIn: '{{count}} sn içinde kapanacak…',
+      cancelAutoClose: 'Otomatik kapatmayı iptal et',
       labelWeight: 'Etiket',
       scaleWeight: 'Tartı',
       netWeight: 'Net',

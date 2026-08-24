@@ -6777,6 +6777,8 @@ export default {
       brand: 'Brand',
       color: 'Color',
       coreWeight: 'Core',
+      closingIn: 'Closing in {{count}}…',
+      cancelAutoClose: 'Cancel auto-close',
       labelWeight: 'Label',
       scaleWeight: 'Scale',
       netWeight: 'Net',

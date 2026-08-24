@@ -13,6 +13,11 @@ import { ScanHint } from '../../components/spoolbuddy/ScanHint';
 import { AssignToAmsModal } from '../../components/spoolbuddy/AssignToAmsModal';
 import { LinkSpoolModal } from '../../components/spoolbuddy/LinkSpoolModal';
 import { BarcodeAddModal } from '../../components/spoolbuddy/BarcodeAddModal';
+import {
+  AUTO_CLOSE_SECONDS,
+  AUTO_CLOSE_ARM_THRESHOLD_G,
+  AUTO_CLOSE_EMPTY_THRESHOLD_G,
+} from '../../components/spoolbuddy/autoClose';
 
 function normalizeHexTag(value: string | null | undefined): string {
   if (!value) return '';
@@ -372,6 +377,85 @@ export function SpoolBuddyDashboard() {
     setHiddenTagId(displayedTagId);
   };
 
+  // ── Auto-close: the Current Spool card closes itself once the roll is
+  // lifted off the scale (see autoClose.ts for the tuning constants).
+  // Purely weight-transition driven: ARM when the live scale exceeds the arm
+  // threshold while the matched-spool card is visible, FIRE the countdown
+  // when it then drops below the empty threshold. Cancellable three ways:
+  // the banner's Cancel button, putting the roll back, or any modal opening
+  // over the card. After a cancel it stays disarmed until the scale exceeds
+  // the arm threshold again, so the same lift can't re-trigger it.
+  const [autoCloseArmed, setAutoCloseArmed] = useState(false);
+  const [autoCloseEndsAt, setAutoCloseEndsAt] = useState<number | null>(null);
+  const [autoCloseRemaining, setAutoCloseRemaining] = useState<number | null>(null);
+
+  const spoolCardVisible =
+    sbState.deviceOnline &&
+    !!(displayedSpool || sbState.matchedSpool) &&
+    !!displayedTagId &&
+    hiddenTagId !== displayedTagId;
+  const modalOverCard = showLinkModal || showAssignAmsModal || showQuickAddModal || barcodeFlow.isOpen;
+
+  useEffect(() => {
+    if (!spoolCardVisible || modalOverCard) {
+      setAutoCloseArmed(false);
+      setAutoCloseEndsAt(null);
+      return;
+    }
+    const w = sbState.weight;
+    if (w === null) return;
+    // The roll came back mid-countdown (checked first — coming back above
+    // the ARM threshold must cancel too, not just re-arm).
+    if (autoCloseEndsAt !== null && w >= AUTO_CLOSE_EMPTY_THRESHOLD_G) {
+      setAutoCloseEndsAt(null);
+    }
+    if (w > AUTO_CLOSE_ARM_THRESHOLD_G) {
+      setAutoCloseArmed(true);
+      return;
+    }
+    if (autoCloseArmed && autoCloseEndsAt === null && w < AUTO_CLOSE_EMPTY_THRESHOLD_G) {
+      setAutoCloseArmed(false);
+      setAutoCloseEndsAt(Date.now() + AUTO_CLOSE_SECONDS * 1000);
+    }
+  }, [spoolCardVisible, modalOverCard, sbState.weight, autoCloseArmed, autoCloseEndsAt]);
+
+  // A different roll/card resets everything. Ref-compared so the mount's
+  // null→tag transition doesn't count — that fires in the same commit as the
+  // first arming and would silently disarm it.
+  const autoClosePrevTagRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (autoClosePrevTagRef.current !== null && displayedTagId !== autoClosePrevTagRef.current) {
+      setAutoCloseArmed(false);
+      setAutoCloseEndsAt(null);
+    }
+    autoClosePrevTagRef.current = displayedTagId;
+  }, [displayedTagId]);
+
+  // Countdown tick → close via the same path as tapping Close.
+  useEffect(() => {
+    if (autoCloseEndsAt === null) {
+      setAutoCloseRemaining(null);
+      return;
+    }
+    const tick = () => {
+      const secs = Math.max(0, Math.ceil((autoCloseEndsAt - Date.now()) / 1000));
+      setAutoCloseRemaining(secs);
+      if (secs <= 0) {
+        setAutoCloseEndsAt(null);
+        setHiddenTagId(displayedTagId);
+      }
+    };
+    tick();
+    const handle = setInterval(tick, 250);
+    return () => clearInterval(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoCloseEndsAt, displayedTagId]);
+
+  const cancelAutoClose = () => {
+    setAutoCloseEndsAt(null);
+    setAutoCloseArmed(false);
+  };
+
   const handleLinkTagToSpool = async (spool: InventorySpool) => {
     if (!displayedTagId) return;
     try {
@@ -672,6 +756,8 @@ export function SpoolBuddyDashboard() {
                       : undefined
                   }
                   onClose={handleCloseSpoolCard}
+                  autoCloseRemaining={autoCloseEndsAt !== null ? autoCloseRemaining : null}
+                  onCancelAutoClose={cancelAutoClose}
                 />
               ) : currentTagId && displayedTagId && !displayedSpool && !sbState.matchedSpool && hiddenTagId !== displayedTagId ? (
                 <UnknownTagCard

@@ -6769,6 +6769,8 @@ export default {
       brand: "Бренд",
       color: "Колір",
       coreWeight: "Сердечник",
+      closingIn: 'Закриється через {{count}}…',
+      cancelAutoClose: 'Скасувати автозакриття',
       labelWeight: "Етикетка",
       scaleWeight: "Показання ваг",
       netWeight: "Нетто",

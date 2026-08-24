@@ -659,4 +659,86 @@ describe('SpoolBuddyDashboard', () => {
     });
   });
 
+
+  describe('auto-close countdown when the roll is lifted', () => {
+    const MATCHED = {
+      id: 42, tag_uid: 'AABB1122', material: 'PLA', subtype: null,
+      color_name: 'Red', rgba: 'FF0000FF', brand: 'Bambu',
+      label_weight: 1000, core_weight: 250, weight_used: 200,
+    };
+
+    function renderWithWeight(initialWeight: number | null) {
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+      let setCtx: (ctx: unknown) => void = () => {};
+      const ctxFor = (weight: number | null) => ({
+        ...mockOutletContext,
+        sbState: { ...mockOutletContext.sbState, deviceOnline: true, matchedSpool: MATCHED, weight, weightStable: true },
+      });
+      function StatefulWrapper() {
+        const [ctx, set] = React.useState<unknown>(ctxFor(initialWeight));
+        setCtx = set;
+        return <Outlet context={ctx} />;
+      }
+      render(
+        <ToastProvider>
+          <QueryClientProvider client={qc}>
+            <MemoryRouter initialEntries={['/spoolbuddy']}>
+              <Routes>
+                <Route element={<StatefulWrapper />}>
+                  <Route path="spoolbuddy" element={<SpoolBuddyDashboard />} />
+                </Route>
+              </Routes>
+            </MemoryRouter>
+          </QueryClientProvider>
+        </ToastProvider>
+      );
+      return { setWeight: (w: number | null) => act(() => setCtx(ctxFor(w))) };
+    }
+
+    it('arms above the threshold, fires below it, and Cancel disarms until re-armed', async () => {
+      const { setWeight } = renderWithWeight(1247);
+      expect(await screen.findByText('Assign to AMS')).toBeTruthy();
+      expect(screen.queryByText(/Closing in/)).toBeNull();
+
+      // Roll lifted: >250g → <50g starts the countdown.
+      setWeight(5);
+      expect(await screen.findByText('Closing in 3…')).toBeTruthy();
+
+      // Cancel clears it, and staying light must NOT re-trigger.
+      fireEvent.click(screen.getByRole('button', { name: /Cancel auto-close/i }));
+      await waitFor(() => expect(screen.queryByText(/Closing in/)).toBeNull());
+      setWeight(4);
+      expect(screen.queryByText(/Closing in/)).toBeNull();
+      expect(screen.getByText('Assign to AMS')).toBeTruthy();
+    });
+
+    it('closes the card by itself when the countdown runs out', async () => {
+      const { setWeight } = renderWithWeight(1247);
+      expect(await screen.findByText('Assign to AMS')).toBeTruthy();
+      setWeight(5);
+      expect(await screen.findByText('Closing in 3…')).toBeTruthy();
+
+      // Let the real 3s countdown elapse — the card closes via the same path
+      // as tapping Close.
+      await waitFor(() => expect(screen.queryByText('Assign to AMS')).toBeNull(), { timeout: 5000 });
+    }, 10000);
+
+    it('putting the roll back mid-countdown cancels the auto-close', async () => {
+      const { setWeight } = renderWithWeight(1247);
+      expect(await screen.findByText('Assign to AMS')).toBeTruthy();
+      setWeight(5);
+      expect(await screen.findByText('Closing in 3…')).toBeTruthy();
+
+      setWeight(800);
+      await waitFor(() => expect(screen.queryByText(/Closing in/)).toBeNull());
+      expect(screen.getByText('Assign to AMS')).toBeTruthy();
+    });
+
+    it('never fires when the scale was light from the start (no arming)', async () => {
+      const { setWeight } = renderWithWeight(30);
+      expect(await screen.findByText('Assign to AMS')).toBeTruthy();
+      setWeight(5);
+      expect(screen.queryByText(/Closing in/)).toBeNull();
+    });
+  });
 });

@@ -6726,6 +6726,8 @@ export default {
       brand: 'Marke',
       color: 'Farbe',
       coreWeight: 'Kern',
+      closingIn: 'Schließt in {{count}}…',
+      cancelAutoClose: 'Automatisches Schließen abbrechen',
       labelWeight: 'Etikett',
       scaleWeight: 'Waage',
       netWeight: 'Netto',

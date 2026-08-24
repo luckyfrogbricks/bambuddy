@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, AlertTriangle, RefreshCw, Unlink } from 'lucide-react';
+import { Check, AlertTriangle, RefreshCw, Timer, Unlink } from 'lucide-react';
 import type { MatchedSpool } from '../../hooks/useSpoolBuddyState';
 import { spoolbuddyApi } from '../../api/client';
 import { RefillBadge } from '../RefillBadge';
@@ -27,6 +27,10 @@ function getDefaultCoreWeight(): number {
 }
 
 interface SpoolInfoCardProps {
+  /** Seconds left on the auto-close countdown (null = not counting).
+   *  Armed by the dashboard when the roll is lifted off the scale. */
+  autoCloseRemaining?: number | null;
+  onCancelAutoClose?: () => void;
   spool: MatchedSpool;
   scaleWeight: number | null;
   onClose?: () => void;
@@ -36,7 +40,7 @@ interface SpoolInfoCardProps {
   onUnassignFromAms?: () => void;
 }
 
-export function SpoolInfoCard({ spool, scaleWeight, onClose, onSyncWeight, onAssignToAms, isAssigned, onUnassignFromAms }: SpoolInfoCardProps) {
+export function SpoolInfoCard({ spool, scaleWeight, onClose, onSyncWeight, onAssignToAms, isAssigned, onUnassignFromAms, autoCloseRemaining, onCancelAutoClose }: SpoolInfoCardProps) {
   const { t } = useTranslation();
   const [syncing, setSyncing] = useState(false);
   const [synced, setSynced] = useState(false);
@@ -183,6 +187,24 @@ export function SpoolInfoCard({ spool, scaleWeight, onClose, onSyncWeight, onAss
           </span>
         </div>
       </div>
+
+      {/* Auto-close countdown — the roll was lifted off the scale; the card
+          closes itself unless cancelled (or the roll comes back). */}
+      {autoCloseRemaining !== null && autoCloseRemaining !== undefined && onCancelAutoClose && (
+        <div className="flex items-center justify-center gap-3 w-full">
+          <span className="flex items-center gap-2 text-sm text-zinc-300">
+            <Timer className="w-4 h-4 text-green-500" />
+            {t('spoolbuddy.spool.closingIn', 'Closing in {{count}}…', { count: autoCloseRemaining })}
+          </span>
+          <button
+            onClick={onCancelAutoClose}
+            aria-label={t('spoolbuddy.spool.cancelAutoClose', 'Cancel auto-close')}
+            className="px-4 py-2 rounded-lg text-sm font-medium bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors min-h-[44px]"
+          >
+            {t('common.cancel', 'Cancel')}
+          </button>
+        </div>
+      )}
 
       {/* Action buttons */}
       <div className="flex gap-2 justify-center">

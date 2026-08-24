@@ -6716,6 +6716,8 @@ export default {
       brand: 'Marque',
       color: 'Couleur',
       coreWeight: 'Noyau',
+      closingIn: 'Fermeture dans {{count}}…',
+      cancelAutoClose: 'Annuler la fermeture automatique',
       labelWeight: 'Étiquette',
       scaleWeight: 'Balance',
       netWeight: 'Réseau',

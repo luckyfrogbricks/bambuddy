@@ -6727,6 +6727,8 @@ export default {
       brand: 'ブランド',
       color: '色',
       coreWeight: 'コア',
+      closingIn: '{{count}}秒後に閉じます…',
+      cancelAutoClose: '自動クローズをキャンセル',
       labelWeight: 'ラベル',
       scaleWeight: '計量',
       netWeight: '正味',
