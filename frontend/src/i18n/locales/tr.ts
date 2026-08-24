@@ -6544,8 +6544,6 @@ export default {
       noMatchBody: "Bu kod ne envanterinde ne de topluluk veritabanlarında var. Amazon kutularında genellikle perakende barkodu yerine bir Amazon kodu bulunur — kutuda ikinci bir barkod ara.",
       addBasicSpool: "Temel makara ekle",
       findFilament: "Bu filamenti bul…",
-      findTitle: "Bu filamenti bul",
-      findHint: "Markaya, malzemeye veya renge göre ara, ardından bu barkodu ona bağla.",
       findPlaceholder: "örn. polymaker antrasit",
       findNoResults: "Eşleşme bulunamadı",
       chipTag: "Etiket",
@@ -6593,7 +6591,6 @@ export default {
       hueMulticolor: 'Çok renkli',
       hueGrayscale: 'Gri tonlama',
       hueEarthTones: 'Toprak tonları',
-      browseSearchInstead: 'Metinle ara',
     },
     nav: {
       dashboard: 'Gösterge Paneli',

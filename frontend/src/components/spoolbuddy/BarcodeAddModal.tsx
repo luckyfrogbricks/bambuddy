@@ -1,22 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Barcode, Check, ChevronDown, ChevronUp, LayoutGrid, Loader2, MapPin, Plus, Search, AlertTriangle } from 'lucide-react';
+import { Barcode, Check, ChevronDown, ChevronUp, Loader2, MapPin, Plus, Search, AlertTriangle } from 'lucide-react';
 import { api, type InventorySpool, type CatalogSearchRow } from '../../api/client';
 import type { ScannedBarcode, LinkedCode } from '../../hooks/useSpoolBuddyState';
 import { spoolColorString } from '../../utils/colors';
-import { RefillBadge } from '../RefillBadge';
 import { SpoolIcon } from './SpoolIcon';
 import { KioskToggle } from './KioskToggle';
-import { CatalogBrowseSheet, rowColors, rowTempRange, type BrowseNav } from './CatalogBrowseSheet';
-import { FilamentCard } from '../color';
+import { CatalogBrowseSheet, type BrowseNav } from './CatalogBrowseSheet';
 import { getDefaultCoreWeight } from './coreWeight';
+import { materialLine } from '../../utils/materialLine';
 
 // NOTE: this is the SpoolBuddy (kiosk) add-to-inventory flow, driven entirely
 // by the hardware USB barcode scanner. It deliberately does NOT use the main
 // app's camera/OCR BarcodeScannerModal — the kiosk has no camera and runs over
 // plain HTTP where getUserMedia is unavailable.
 
-type Step = 'waiting' | 'manual' | 'looking_up' | 'confirm' | 'no_match' | 'find' | 'browse';
+type Step = 'waiting' | 'manual' | 'looking_up' | 'confirm' | 'no_match' | 'browse';
 
 // Modern Amazon ASIN shape — mirrors the backend classifier's heuristic.
 const ASIN_RE = /^B0[A-Z0-9]{8}$/;
@@ -90,26 +89,16 @@ export function BarcodeAddModal({
 }: BarcodeAddModalProps) {
   const { t } = useTranslation();
   const [step, setStep] = useState<Step>('waiting');
-  // Where the Find screen was opened from, so its Back button returns there
-  // (the scan-waiting screen B, or the no-match screen E).
-  const [findBackStep, setFindBackStep] = useState<Step>('no_match');
   const [resolved, setResolved] = useState<Resolved | null>(null);
   const [invalidCode, setInvalidCode] = useState<string | null>(null);
   const [manualCode, setManualCode] = useState('');
-  const [findQuery, setFindQuery] = useState('');
-  const [findRows, setFindRows] = useState<CatalogSearchRow[]>([]);
-  const [findLoading, setFindLoading] = useState(false);
-  // Find-step selection: rows are selected first (tap row, or tap the
-  // disclosure to select + expand full properties), then Confirm proceeds.
-  const [findSelectedIdx, setFindSelectedIdx] = useState<number | null>(null);
-  const [findExpandedIdx, setFindExpandedIdx] = useState<number | null>(null);
-  // Whether the confirm screen was reached via Find — its left button is then
-  // Back (returns to Find with all state intact) instead of Cancel.
-  const [cameFromFind, setCameFromFind] = useState(false);
-  // Same for the tap-first catalog browser. Its navigation state lives here
-  // (not in the panel) so Back-from-confirm restores the exact browse screen.
+  // Whether the confirm screen was reached via the catalog browser — its left
+  // button is then Back (returns there with all state intact) instead of
+  // Cancel. The browser's navigation AND search-query state live here (not
+  // in the sheet) so Back-from-confirm restores the exact screen.
   const [cameFromBrowse, setCameFromBrowse] = useState(false);
   const [browseNav, setBrowseNav] = useState<BrowseNav>({});
+  const [browseSearch, setBrowseSearch] = useState('');
   // Where Browse was opened from, so its root-level Back returns there.
   const [browseBackStep, setBrowseBackStep] = useState<Step>('waiting');
   const [busy, setBusy] = useState(false);
@@ -169,7 +158,6 @@ export function BarcodeAddModal({
     setResolved(r);
     setInvalidCode(null);
     setLinkedByUser(false);
-    setCameFromFind(false);
     setCameFromBrowse(false);
     setPickedCodes(null);
     // Auto-arm the refill toggle when the resolved code is itself a known refill
@@ -227,8 +215,6 @@ export function BarcodeAddModal({
       setInvalidCode(null);
     }
     setManualCode('');
-    setFindQuery('');
-    setFindRows([]);
     setBusy(false);
     setCreateError(null);
     setLocationId(lastUsedLocation?.id ?? null);
@@ -238,19 +224,11 @@ export function BarcodeAddModal({
     setNewLocOpen(false);
     setNewLocName('');
     setNewLocError(null);
-    setFindSelectedIdx(null);
-    setFindExpandedIdx(null);
-    setCameFromFind(false);
     setCameFromBrowse(false);
     setBrowseNav({});
+    setBrowseSearch('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
-
-  // A new query invalidates the previous selection/expansion.
-  useEffect(() => {
-    setFindSelectedIdx(null);
-    setFindExpandedIdx(null);
-  }, [findQuery]);
 
   // Locations for the picker — fetched per open so a location added elsewhere
   // (web UI, another device) shows up without a kiosk reload.
@@ -300,71 +278,6 @@ export function BarcodeAddModal({
     [applyResolved],
   );
 
-  // Instant local inventory matches from the already-loaded spools list, so
-  // the user's own filaments appear the moment they type — no round-trip.
-  const localMatches = useMemo<CatalogSearchRow[]>(() => {
-    const q = findQuery.trim().toLowerCase();
-    if (q.length < 2) return [];
-    const tokens = q.split(/\s+/);
-    return spools
-      .filter((s) => !s.archived_at)
-      .filter((s) => {
-        const hay = [s.brand, s.material, s.subtype, s.color_name].filter(Boolean).join(' ').toLowerCase();
-        return tokens.every((tok) => hay.includes(tok));
-      })
-      .slice(0, 10)
-      .map((s) => ({
-        source: 'inventory' as const,
-        spool_id: s.id,
-        material: s.material,
-        brand: s.brand,
-        subtype: s.subtype,
-        color_name: s.color_name,
-        rgba: s.rgba,
-        label_weight: s.label_weight,
-        nozzle_temp_min: s.nozzle_temp_min ?? null,
-        nozzle_temp_max: s.nozzle_temp_max ?? null,
-        codes: [
-          ...(s.gtin_code ? [{ code: s.gtin_code, kind: 'gtin' as const, is_refill: !!s.bought_as_refill }] : []),
-          ...(s.sku_code ? [{ code: s.sku_code, kind: 'sku' as const, is_refill: !!s.bought_as_refill }] : []),
-          ...(s.asin_code ? [{ code: s.asin_code, kind: 'sku' as const, is_refill: !!s.bought_as_refill }] : []),
-        ],
-      }));
-  }, [findQuery, spools]);
-
-  // Debounced catalog search for the Find step (inventory + community DBs).
-  useEffect(() => {
-    if (step !== 'find') return;
-    const q = findQuery.trim();
-    if (q.length < 2) {
-      setFindRows([]);
-      return;
-    }
-    let cancelled = false;
-    setFindLoading(true);
-    const handle = setTimeout(async () => {
-      try {
-        const rows = await api.searchBarcodeCatalog(q);
-        if (!cancelled) setFindRows(rows);
-      } catch {
-        if (!cancelled) setFindRows([]);
-      } finally {
-        if (!cancelled) setFindLoading(false);
-      }
-    }, 300);
-    return () => {
-      cancelled = true;
-      clearTimeout(handle);
-    };
-  }, [step, findQuery]);
-
-  // Merge instant local matches ahead of server rows, de-duplicating the
-  // backend's own inventory hits (same spool_id) so they don't appear twice.
-  const displayRows = useMemo<CatalogSearchRow[]>(() => {
-    const localIds = new Set(localMatches.map((r) => r.spool_id));
-    return [...localMatches, ...findRows.filter((r) => r.spool_id == null || !localIds.has(r.spool_id))];
-  }, [localMatches, findRows]);
-
   const selectCatalogRow = useCallback(
     (row: CatalogSearchRow) => {
       setResolved((prev) => ({
@@ -390,19 +303,9 @@ export function BarcodeAddModal({
     [resolved],
   );
 
-  const confirmFindSelection = useCallback(() => {
-    if (findSelectedIdx === null) return;
-    const row = displayRows[findSelectedIdx];
-    if (!row) return;
-    selectCatalogRow(row);
-    setCameFromFind(true);
-    setCameFromBrowse(false);
-  }, [findSelectedIdx, displayRows, selectCatalogRow]);
-
   const pickFromBrowse = useCallback(
     (row: CatalogSearchRow) => {
       selectCatalogRow(row);
-      setCameFromFind(false);
       setCameFromBrowse(true);
     },
     [selectCatalogRow],
@@ -581,12 +484,9 @@ export function BarcodeAddModal({
         onNavChange={setBrowseNav}
         onPick={pickFromBrowse}
         onExit={() => setStep(browseBackStep)}
-        onSearchInstead={() => {
-          setFindBackStep('browse');
-          setFindQuery('');
-          setFindRows([]);
-          setStep('find');
-        }}
+        search={browseSearch}
+        onSearchChange={setBrowseSearch}
+        spools={spools}
         tagUid={tagUid}
         grossWeight={grossWeight}
       />
@@ -595,11 +495,7 @@ export function BarcodeAddModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div
-        className={`bg-zinc-800 rounded-2xl p-6 w-full border border-zinc-700 ${
-          step === 'find' ? 'max-w-3xl' : 'max-w-lg'
-        }`}
-      >
+      <div className="bg-zinc-800 rounded-2xl p-6 w-full max-w-lg border border-zinc-700">
         {/* --- Chips: tag + scale (shared header for scan/confirm) --- */}
         {(step === 'waiting' || step === 'confirm' || step === 'looking_up') && (
           <div className="flex flex-wrap gap-2 mb-4">
@@ -640,26 +536,17 @@ export function BarcodeAddModal({
                 </p>
               </div>
             </div>
+            {/* One entry point: Find This Filament IS the catalog browser
+                (tap-first drill-down with an inline keyword search). */}
             <div className="flex gap-2 mb-2.5">
               <button
                 type="button"
                 className={btnSecondary}
                 onClick={() => {
                   setBrowseNav({});
+                  setBrowseSearch('');
                   setBrowseBackStep('waiting');
                   setStep('browse');
-                }}
-              >
-                <LayoutGrid className="w-4 h-4" /> {t('spoolbuddy.barcode.browseCatalog', 'Browse Catalog')}
-              </button>
-              <button
-                type="button"
-                className={btnSecondary}
-                onClick={() => {
-                  setFindBackStep('waiting');
-                  setFindQuery('');
-                  setFindRows([]);
-                  setStep('find');
                 }}
               >
                 <Search className="w-4 h-4" /> {t('spoolbuddy.barcode.findFilament', 'Find This Filament…')}
@@ -753,7 +640,7 @@ export function BarcodeAddModal({
                   {resolved.color_name || t('spoolbuddy.barcode.unknownColor', 'Unknown color')}
                 </h4>
                 <p className="text-sm text-zinc-400 truncate">
-                  {[resolved.brand, resolved.material, resolved.subtype].filter(Boolean).join(' • ')}
+                  {[resolved.brand, materialLine(resolved.material, resolved.subtype)].filter(Boolean).join(' • ')}
                   {resolved.label_weight ? ` • ${resolved.label_weight} g` : ''}
                 </p>
                 <span className="inline-flex items-center gap-1.5 mt-2 px-2.5 py-1 rounded-full text-xs font-medium bg-green-500/15 text-green-400 border border-green-500/30">
@@ -886,13 +773,13 @@ export function BarcodeAddModal({
             )}
 
             <div className="flex gap-2">
-              {cameFromFind || cameFromBrowse ? (
-                // Reached via Find or Browse — Back returns there with the
-                // query/results/selection (or browse position) untouched.
+              {cameFromBrowse ? (
+                // Reached via the catalog browser — Back returns there with
+                // the position/search untouched.
                 <button
                   type="button"
                   className={btnGhost}
-                  onClick={() => setStep(cameFromFind ? 'find' : 'browse')}
+                  onClick={() => setStep('browse')}
                   disabled={busy}
                 >
                   {t('common.back', 'Back')}
@@ -965,23 +852,12 @@ export function BarcodeAddModal({
               </button>
               <button
                 type="button"
-                className={btnSecondary}
-                onClick={() => {
-                  setBrowseNav({});
-                  setBrowseBackStep('no_match');
-                  setStep('browse');
-                }}
-              >
-                <LayoutGrid className="w-4 h-4" /> {t('spoolbuddy.barcode.browseCatalog', 'Browse Catalog')}
-              </button>
-              <button
-                type="button"
                 className={btnPrimary}
                 onClick={() => {
-                  setFindBackStep('no_match');
-                  setFindQuery('');
-                  setFindRows([]);
-                  setStep('find');
+                  setBrowseNav({});
+                  setBrowseSearch('');
+                  setBrowseBackStep('no_match');
+                  setStep('browse');
                 }}
               >
                 <Search className="w-4 h-4" /> {t('spoolbuddy.barcode.findFilament', 'Find This Filament…')}
@@ -990,79 +866,6 @@ export function BarcodeAddModal({
           </>
         )}
 
-        {/* --- Screen F: find this filament --- */}
-        {step === 'find' && (
-          <>
-            <h3 className="text-lg font-semibold text-zinc-100 mb-1">
-              {t('spoolbuddy.barcode.findTitle', 'Find This Filament')}
-            </h3>
-            <p className="text-sm text-zinc-400 mb-4">
-              {t('spoolbuddy.barcode.findHint', 'Search by brand, material, or color — then link this barcode to it.')}
-            </p>
-            <div className="flex items-center gap-2 mb-4 px-3 py-2.5 rounded-lg bg-zinc-900 border border-zinc-600">
-              <Search className="w-4 h-4 text-zinc-500 shrink-0" />
-              <input
-                type="text"
-                autoFocus
-                value={findQuery}
-                onChange={(e) => setFindQuery(e.target.value)}
-                className="flex-1 bg-transparent text-zinc-100 focus:outline-none"
-                placeholder={t('spoolbuddy.barcode.findPlaceholder', 'e.g. polymaker charcoal')}
-              />
-            </div>
-            <div className="max-h-72 overflow-y-auto mb-5">
-              {findLoading && <p className="text-sm text-zinc-500 text-center py-4">{t('common.loading', 'Loading…')}</p>}
-              {!findLoading && findQuery.trim().length >= 2 && displayRows.length === 0 && (
-                <p className="text-sm text-zinc-500 text-center py-4">
-                  {t('spoolbuddy.barcode.findNoResults', 'No matches found')}
-                </p>
-              )}
-              {/* Results as FilamentCards (the Color Kit organism): tap to
-                  select, Details discloses every code with its refill flag so
-                  visually identical twins stay tellable apart. */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {displayRows.map((row, i) => (
-                  <FilamentCard
-                    key={`${row.source}-${row.spool_id ?? i}-${i}`}
-                    colors={rowColors(row)}
-                    title={row.color_name ?? row.subtype ?? row.material ?? ''}
-                    subtitle={[row.brand, row.subtype || row.material].filter(Boolean).join(' · ')}
-                    source={row.source}
-                    weight={row.label_weight}
-                    tempRange={rowTempRange(row)}
-                    primaryCode={row.codes[0]?.code ?? null}
-                    badge={
-                      row.codes.length > 0 && row.codes.every((c) => c.is_refill) ? (
-                        <RefillBadge />
-                      ) : undefined
-                    }
-                    codes={row.codes}
-                    expanded={findExpandedIdx === i}
-                    onToggleExpand={() => {
-                      setFindSelectedIdx(i);
-                      setFindExpandedIdx((v) => (v === i ? null : i));
-                    }}
-                    selected={findSelectedIdx === i}
-                    onClick={() => setFindSelectedIdx(i)}
-                  />
-                ))}
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <button type="button" className={btnGhost} onClick={() => setStep(findBackStep)}>
-                {t('common.back', 'Back')}
-              </button>
-              <button
-                type="button"
-                className={btnPrimary}
-                disabled={findSelectedIdx === null}
-                onClick={confirmFindSelection}
-              >
-                {t('common.confirm', 'Confirm')}
-              </button>
-            </div>
-          </>
-        )}
       </div>
     </div>
   );

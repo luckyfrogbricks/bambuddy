@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertTriangle, Check, ChevronRight, Loader2, Search, X } from 'lucide-react';
 import {
@@ -7,18 +7,20 @@ import {
   type CatalogBrowseResponse,
   type CatalogHueGroup,
   type CatalogSearchRow,
+  type InventorySpool,
 } from '../../api/client';
 import { spoolColorString } from '../../utils/colors';
 import { ColorFilter, ColorSwatch, FilamentCard, TileButton } from '../color';
 import { RefillBadge } from '../RefillBadge';
 
-// The full-screen tap-first catalog browser (1024×600 kiosk sheet):
-// brand → materials (jumbo tiles) → product lines → hue-sorted color grid,
-// with a fixed 11-family ColorFilter rail at every depth (empty families dim,
-// never disappear) and hue-filtered results as FilamentCards, yours-first.
-// The on-screen keyboard survives only as the "Search by text instead"
-// footer link. Leaf picks are CatalogSearchRow — the same confirm/create
-// path as a Find pick. Replaces the earlier compact CatalogBrowsePanel.
+// The full-screen tap-first catalog browser (1024×600 kiosk sheet) — THE
+// "Find This Filament" experience: brand → materials (jumbo tiles) → product
+// lines → hue-sorted color grid, with a fixed 11-family ColorFilter rail at
+// every depth (empty families dim, never disappear), hue-filtered results as
+// FilamentCards, and an always-visible inline keyword search (no separate
+// screen — typing ≥2 chars swaps the body to search results, instant local
+// inventory matches merged ahead of the community catalogs). Leaf picks are
+// CatalogSearchRow — one shared confirm/create path.
 
 export interface BrowseNav {
   brand?: string;
@@ -34,8 +36,11 @@ interface CatalogBrowseSheetProps {
   onPick: (row: CatalogSearchRow) => void;
   /** Back pressed at the root level, or the ✕ — return to the opening screen. */
   onExit: () => void;
-  /** The footer escape hatch into the restyled keyboard search. */
-  onSearchInstead: () => void;
+  /** Inline keyword search — lifted so Back-from-confirm restores results. */
+  search: string;
+  onSearchChange: (q: string) => void;
+  /** Loaded inventory, for instant local matches while typing. */
+  spools: InventorySpool[];
   tagUid: string | null;
   grossWeight: number | null;
 }
@@ -58,7 +63,9 @@ export function CatalogBrowseSheet({
   onNavChange,
   onPick,
   onExit,
-  onSearchInstead,
+  search,
+  onSearchChange,
+  spools,
   tagUid,
   grossWeight,
 }: CatalogBrowseSheetProps) {
@@ -69,6 +76,73 @@ export function CatalogBrowseSheet({
   const [error, setError] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+  const [searchRows, setSearchRows] = useState<CatalogSearchRow[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searching = search.trim().length >= 2;
+
+  // Instant local inventory matches from the already-loaded spools list, so
+  // the user's own filaments appear the moment they type — no round-trip.
+  const localMatches = useMemo<CatalogSearchRow[]>(() => {
+    const q = search.trim().toLowerCase();
+    if (q.length < 2) return [];
+    const tokens = q.split(/\s+/);
+    return spools
+      .filter((s) => !s.archived_at)
+      .filter((s) => {
+        const hay = [s.brand, s.material, s.subtype, s.color_name].filter(Boolean).join(' ').toLowerCase();
+        return tokens.every((tok) => hay.includes(tok));
+      })
+      .slice(0, 10)
+      .map((s) => ({
+        source: 'inventory' as const,
+        spool_id: s.id,
+        material: s.material,
+        brand: s.brand,
+        subtype: s.subtype,
+        color_name: s.color_name,
+        rgba: s.rgba,
+        label_weight: s.label_weight,
+        nozzle_temp_min: s.nozzle_temp_min ?? null,
+        nozzle_temp_max: s.nozzle_temp_max ?? null,
+        codes: [
+          ...(s.gtin_code ? [{ code: s.gtin_code, kind: 'gtin' as const, is_refill: !!s.bought_as_refill }] : []),
+          ...(s.sku_code ? [{ code: s.sku_code, kind: 'sku' as const, is_refill: !!s.bought_as_refill }] : []),
+          ...(s.asin_code ? [{ code: s.asin_code, kind: 'sku' as const, is_refill: !!s.bought_as_refill }] : []),
+        ],
+      }));
+  }, [search, spools]);
+
+  // Debounced catalog search (inventory + community DBs).
+  useEffect(() => {
+    setExpandedIdx(null);
+    const q = search.trim();
+    if (q.length < 2) {
+      setSearchRows([]);
+      return;
+    }
+    let cancelled = false;
+    setSearchLoading(true);
+    const handle = setTimeout(async () => {
+      try {
+        const rows = await api.searchBarcodeCatalog(q);
+        if (!cancelled) setSearchRows(rows);
+      } catch {
+        if (!cancelled) setSearchRows([]);
+      } finally {
+        if (!cancelled) setSearchLoading(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+    };
+  }, [search]);
+
+  // Local matches first, server rows de-duplicated behind them.
+  const searchResults = useMemo<CatalogSearchRow[]>(() => {
+    const localIds = new Set(localMatches.map((r) => r.spool_id));
+    return [...localMatches, ...searchRows.filter((r) => r.spool_id == null || !localIds.has(r.spool_id))];
+  }, [localMatches, searchRows]);
 
   // Level data (or hue-filtered rows) for the current position.
   useEffect(() => {
@@ -114,7 +188,8 @@ export function CatalogBrowseSheet({
   }, [nav.brand, nav.material, nav.line, attempt]);
 
   const goBack = () => {
-    if (nav.hue) onNavChange({ ...nav, hue: null });
+    if (searching) onSearchChange('');
+    else if (nav.hue) onNavChange({ ...nav, hue: null });
     else if (nav.line) onNavChange({ brand: nav.brand, material: nav.material });
     else if (nav.material) onNavChange({ brand: nav.brand });
     else if (nav.brand) onNavChange({});
@@ -180,27 +255,50 @@ export function CatalogBrowseSheet({
         </button>
       </div>
 
-      {/* ── The fixed hue rail — every family, empties dimmed ──────────── */}
-      <div className="shrink-0 px-4 pb-1.5">
-        <ColorFilter
-          groups={hueGroups}
-          value={nav.hue ? [nav.hue] : null}
-          onChange={(families) =>
-            onNavChange({ ...nav, hue: families ? (families[0] as BrowseHue) : null })
-          }
-          showLabels
-        />
+      {/* ── Hue rail + inline keyword search (no separate screen) ──────── */}
+      <div className="shrink-0 px-4 pb-1.5 flex items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <ColorFilter
+            groups={hueGroups}
+            value={nav.hue ? [nav.hue] : null}
+            onChange={(families) => {
+              if (searching) onSearchChange('');
+              onNavChange({ ...nav, hue: families ? (families[0] as BrowseHue) : null });
+            }}
+            showLabels
+          />
+        </div>
+        <div className="shrink-0 w-72 flex items-center gap-2 px-3 min-h-[44px] rounded-lg bg-zinc-900 border border-zinc-600 focus-within:border-green-500">
+          <Search className="w-4 h-4 text-zinc-500 shrink-0" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => onSearchChange(e.target.value)}
+            className="flex-1 min-w-0 bg-transparent text-sm text-zinc-100 focus:outline-none"
+            placeholder={t('spoolbuddy.barcode.findPlaceholder', 'e.g. polymaker charcoal')}
+          />
+          {search && (
+            <button
+              type="button"
+              aria-label={t('common.clear', 'Clear')}
+              onClick={() => onSearchChange('')}
+              className="shrink-0 p-1 rounded-full text-zinc-500 hover:text-zinc-200"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* ── Body ───────────────────────────────────────────────────────── */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 pb-3">
-        {loading && (
+        {!searching && loading && (
           <div className="flex items-center justify-center h-full">
             <Loader2 className="w-7 h-7 text-green-500 animate-spin" />
           </div>
         )}
 
-        {!loading && error && (
+        {!searching && !loading && error && (
           <div className="flex flex-col items-center justify-center h-full gap-3 text-sm text-zinc-400">
             <AlertTriangle className="w-6 h-6 text-amber-500" />
             {t('spoolbuddy.barcode.browseLoadFailed', "Couldn't load the catalog")}
@@ -214,7 +312,7 @@ export function CatalogBrowseSheet({
           </div>
         )}
 
-        {!loading && !error && data && !data.enabled && (
+        {!searching && !loading && !error && data && !data.enabled && (
           <div className="flex items-start gap-3 p-4 mt-2 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-200 text-sm">
             <AlertTriangle className="w-5 h-5 shrink-0 text-amber-500" />
             {t(
@@ -224,8 +322,43 @@ export function CatalogBrowseSheet({
           </div>
         )}
 
+        {/* Inline search results — replace the body while a query is active */}
+        {searching && (
+          <>
+            {searchLoading && (
+              <p className="text-sm text-zinc-500 text-center py-4">{t('common.loading', 'Loading…')}</p>
+            )}
+            {!searchLoading && searchResults.length === 0 && (
+              <p className="text-sm text-zinc-500 text-center py-4">
+                {t('spoolbuddy.barcode.findNoResults', 'No matches found')}
+              </p>
+            )}
+            <div className="grid grid-cols-4 gap-2 pt-1">
+              {searchResults.map((row, i) => (
+                <FilamentCard
+                  key={`${row.source}-${row.spool_id ?? i}-${i}`}
+                  colors={rowColors(row)}
+                  title={row.color_name ?? row.subtype ?? row.material ?? ''}
+                  subtitle={[row.brand, row.subtype || row.material].filter(Boolean).join(' · ')}
+                  source={row.source}
+                  weight={row.label_weight}
+                  tempRange={rowTempRange(row)}
+                  primaryCode={row.codes[0]?.code ?? null}
+                  badge={
+                    row.codes.length > 0 && row.codes.every((c) => c.is_refill) ? <RefillBadge /> : undefined
+                  }
+                  codes={row.codes}
+                  expanded={expandedIdx === i}
+                  onToggleExpand={() => setExpandedIdx((v) => (v === i ? null : i))}
+                  onClick={() => onPick(row)}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
         {/* Brands */}
-        {!loading && !error && data?.enabled && !showResultCards && data.level === 'brands' && (
+        {!searching && !loading && !error && data?.enabled && !showResultCards && data.level === 'brands' && (
           <div className="flex flex-col gap-3 pt-1">
             {data.brands.some((b) => b.owned) && (
               <div>
@@ -274,7 +407,8 @@ export function CatalogBrowseSheet({
         )}
 
         {/* Materials & lines — jumbo tiles */}
-        {!loading &&
+        {!searching &&
+          !loading &&
           !error &&
           data?.enabled &&
           !showResultCards &&
@@ -307,7 +441,7 @@ export function CatalogBrowseSheet({
           )}
 
         {/* One line's palette — hue-sorted swatch grid */}
-        {!loading && !error && data?.enabled && !showResultCards && data.level === 'colors' && (
+        {!searching && !loading && !error && data?.enabled && !showResultCards && data.level === 'colors' && (
           <div className="grid grid-cols-8 gap-1.5 pt-1">
             {data.colors.map((row, i) => (
               <ColorSwatch
@@ -323,7 +457,7 @@ export function CatalogBrowseSheet({
         )}
 
         {/* Hue-filtered results — FilamentCards, yours first */}
-        {!loading && !error && data?.enabled && showResultCards && (
+        {!searching && !loading && !error && data?.enabled && showResultCards && (
           <>
             {data.total !== null && data.total > data.colors.length && (
               <p className="text-xs text-zinc-500 pt-1 mb-2">
@@ -368,14 +502,6 @@ export function CatalogBrowseSheet({
           {t('common.back', 'Back')}
         </button>
         <span className="flex-1" />
-        <button
-          type="button"
-          onClick={onSearchInstead}
-          className="min-h-[44px] px-4 rounded-lg text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700 transition-colors flex items-center gap-2"
-        >
-          <Search className="w-4 h-4" />
-          {t('spoolbuddy.barcode.browseSearchInstead', 'Search by text instead')}
-        </button>
       </div>
     </div>
   );

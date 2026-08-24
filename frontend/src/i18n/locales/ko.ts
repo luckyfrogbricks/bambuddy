@@ -6247,8 +6247,6 @@ export default {
       noMatchBody: "이 코드는 인벤토리에도 커뮤니티 데이터베이스에도 없습니다. Amazon 상자에는 소매 바코드 대신 Amazon 코드가 붙어 있는 경우가 많으니 상자에서 두 번째 바코드를 확인하세요.",
       addBasicSpool: "기본 스풀 추가",
       findFilament: "이 필라멘트 찾기…",
-      findTitle: "이 필라멘트 찾기",
-      findHint: "브랜드, 소재 또는 색상으로 검색한 다음 이 바코드를 연결하세요.",
       findPlaceholder: "예: polymaker 차콜",
       findNoResults: "일치 항목 없음",
       chipTag: "태그",
@@ -6296,7 +6294,6 @@ export default {
       hueMulticolor: '멀티컬러',
       hueGrayscale: '그레이스케일',
       hueEarthTones: '어스 톤',
-      browseSearchInstead: '텍스트로 검색',
     },
     nav: {
       dashboard: '대시보드',

@@ -6608,8 +6608,6 @@ export default {
       noMatchBody: "Este código no está en tu inventario ni en las bases de datos de la comunidad. Las cajas de Amazon suelen llevar un código de Amazon en vez del código de venta: busca un segundo código de barras en la caja.",
       addBasicSpool: "Añadir bobina básica",
       findFilament: "Buscar este filamento…",
-      findTitle: "Buscar este filamento",
-      findHint: "Busca por marca, material o color y luego vincula este código de barras.",
       findPlaceholder: "p. ej. polymaker carbón",
       findNoResults: "Sin coincidencias",
       chipTag: "Etiqueta",
@@ -6657,7 +6655,6 @@ export default {
       hueMulticolor: 'Multicolor',
       hueGrayscale: 'Escala de grises',
       hueEarthTones: 'Tonos tierra',
-      browseSearchInstead: 'Buscar por texto',
     },
     nav: {
       dashboard: 'Panel',

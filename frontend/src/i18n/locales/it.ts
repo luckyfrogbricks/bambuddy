@@ -6589,8 +6589,6 @@ export default {
       noMatchBody: "Questo codice non è nel tuo inventario né nei database della community. Le scatole Amazon riportano spesso un codice Amazon invece del codice a barre commerciale — cerca un secondo codice a barre sulla scatola.",
       addBasicSpool: "Aggiungi bobina base",
       findFilament: "Trova questo filamento…",
-      findTitle: "Trova questo filamento",
-      findHint: "Cerca per marca, materiale o colore, poi collega questo codice a barre.",
       findPlaceholder: "es. polymaker antracite",
       findNoResults: "Nessuna corrispondenza",
       chipTag: "Tag",
@@ -6638,7 +6636,6 @@ export default {
       hueMulticolor: 'Multicolore',
       hueGrayscale: 'Scala di grigi',
       hueEarthTones: 'Toni terra',
-      browseSearchInstead: 'Cerca per testo',
     },
     nav: {
       dashboard: 'Dashboard',

@@ -6235,8 +6235,6 @@ export default {
       noMatchBody: "Этого кода нет ни в вашем учёте, ни в базах сообщества. На коробках Amazon часто нанесён код Amazon вместо розничного штрих-кода — поищите на коробке второй штрих-код.",
       addBasicSpool: "Добавить базовую катушку",
       findFilament: "Найти этот филамент…",
-      findTitle: "Найти этот филамент",
-      findHint: "Найдите по бренду, материалу или цвету — затем привяжите к нему этот штрих-код.",
       findPlaceholder: "например, polymaker charcoal",
       findNoResults: "Ничего не найдено",
       chipTag: "Метка",
@@ -6284,7 +6282,6 @@ export default {
       hueMulticolor: 'Многоцветный',
       hueGrayscale: 'Градации серого',
       hueEarthTones: 'Земляные тона',
-      browseSearchInstead: 'Искать текстом',
     },
     nav: {
       dashboard: "Панель",

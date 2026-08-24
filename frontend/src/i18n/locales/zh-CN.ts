@@ -6588,8 +6588,6 @@ export default {
       noMatchBody: "该条码不在你的库存或社区数据库中。亚马逊包装盒通常带有亚马逊编码而非零售条码——请检查盒子上是否有第二个条码。",
       addBasicSpool: "添加基本料盘",
       findFilament: "查找此耗材…",
-      findTitle: "查找此耗材",
-      findHint: "按品牌、材料或颜色搜索，然后将此条码关联到它。",
       findPlaceholder: "例如 polymaker 炭黑",
       findNoResults: "未找到匹配",
       chipTag: "标签",
@@ -6637,7 +6635,6 @@ export default {
       hueMulticolor: '多色',
       hueGrayscale: '灰阶',
       hueEarthTones: '大地色',
-      browseSearchInstead: '改用文字搜索',
     },
     nav: {
       dashboard: '仪表板',

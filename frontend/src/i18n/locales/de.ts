@@ -6600,8 +6600,6 @@ export default {
       noMatchBody: "Dieser Code ist weder in deinem Bestand noch in den Community-Datenbanken. Amazon-Kartons tragen oft einen Amazon-Code statt des Handels-Barcodes – suche nach einem zweiten Barcode auf der Verpackung.",
       addBasicSpool: "Einfache Spule hinzufügen",
       findFilament: "Dieses Filament suchen…",
-      findTitle: "Dieses Filament suchen",
-      findHint: "Nach Marke, Material oder Farbe suchen – dann diesen Barcode damit verknüpfen.",
       findPlaceholder: "z. B. polymaker anthrazit",
       findNoResults: "Keine Treffer gefunden",
       chipTag: "Tag",
@@ -6649,7 +6647,6 @@ export default {
       hueMulticolor: 'Mehrfarbig',
       hueGrayscale: 'Graustufen',
       hueEarthTones: 'Erdtöne',
-      browseSearchInstead: 'Stattdessen per Text suchen',
     },
     nav: {
       dashboard: 'Übersicht',

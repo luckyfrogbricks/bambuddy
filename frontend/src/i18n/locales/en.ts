@@ -6650,8 +6650,6 @@ export default {
       noMatchBody: "This code isn't in your inventory or the community databases. Amazon boxes often carry an Amazon code instead of the retail barcode — check for a second barcode on the box.",
       addBasicSpool: 'Add Basic Spool',
       findFilament: 'Find This Filament…',
-      findTitle: 'Find This Filament',
-      findHint: 'Search by brand, material, or color — then link this barcode to it.',
       findPlaceholder: 'e.g. polymaker charcoal',
       findNoResults: 'No matches found',
       chipTag: 'Tag',
@@ -6700,7 +6698,6 @@ export default {
       hueMulticolor: 'Multicolor',
       hueGrayscale: 'Grayscale',
       hueEarthTones: 'Earth tones',
-      browseSearchInstead: 'Search by text instead',
     },
     nav: {
       dashboard: 'Dashboard',

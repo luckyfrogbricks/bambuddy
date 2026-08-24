@@ -6601,8 +6601,6 @@ export default {
       noMatchBody: "このコードは在庫にもコミュニティデータベースにもありません。Amazonの箱には小売バーコードの代わりにAmazonコードが付いていることが多いので、箱に2つ目のバーコードがないか確認してください。",
       addBasicSpool: "基本スプールを追加",
       findFilament: "このフィラメントを探す…",
-      findTitle: "このフィラメントを探す",
-      findHint: "ブランド・素材・色で検索し、このバーコードを紐付けます。",
       findPlaceholder: "例: polymaker チャコール",
       findNoResults: "一致するものがありません",
       chipTag: "タグ",
@@ -6650,7 +6648,6 @@ export default {
       hueMulticolor: 'マルチカラー',
       hueGrayscale: 'グレースケール',
       hueEarthTones: 'アースカラー',
-      browseSearchInstead: 'テキストで検索',
     },
     nav: {
       dashboard: 'ダッシュボード',

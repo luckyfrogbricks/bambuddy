@@ -6589,8 +6589,6 @@ export default {
       noMatchBody: "Este código não está no seu inventário nem nos bancos de dados da comunidade. Caixas da Amazon costumam ter um código da Amazon em vez do código de barras comercial — procure um segundo código de barras na caixa.",
       addBasicSpool: "Adicionar carretel básico",
       findFilament: "Encontrar este filamento…",
-      findTitle: "Encontrar este filamento",
-      findHint: "Pesquise por marca, material ou cor e vincule este código de barras.",
       findPlaceholder: "ex.: polymaker carvão",
       findNoResults: "Nenhuma correspondência",
       chipTag: "Tag",
@@ -6638,7 +6636,6 @@ export default {
       hueMulticolor: 'Multicolorido',
       hueGrayscale: 'Escala de cinza',
       hueEarthTones: 'Tons terrosos',
-      browseSearchInstead: 'Buscar por texto',
     },
     nav: {
       dashboard: 'Painel',

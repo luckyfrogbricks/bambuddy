@@ -6643,8 +6643,6 @@ export default {
       noMatchBody: "Цього коду немає ні у вашому інвентарі, ні в базах спільноти. На коробках Amazon часто нанесено код Amazon замість роздрібного штрих-коду — пошукайте на коробці другий штрих-код.",
       addBasicSpool: "Додати базову котушку",
       findFilament: "Знайти цей філамент…",
-      findTitle: "Знайти цей філамент",
-      findHint: "Шукайте за брендом, матеріалом або кольором — потім прив’яжіть до нього цей штрих-код.",
       findPlaceholder: "напр. polymaker charcoal",
       findNoResults: "Нічого не знайдено",
       chipTag: "Тег",
@@ -6692,7 +6690,6 @@ export default {
       hueMulticolor: 'Багатоколірний',
       hueGrayscale: 'Відтінки сірого',
       hueEarthTones: 'Земляні тони',
-      browseSearchInstead: 'Шукати текстом',
     },
     nav: {
       dashboard: "Приладова панель",

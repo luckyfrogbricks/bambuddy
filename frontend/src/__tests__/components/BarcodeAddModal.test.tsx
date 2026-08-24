@@ -217,7 +217,7 @@ describe('BarcodeAddModal', () => {
     expect(await screen.findByText(/Heavier than a bare refill/i)).toBeInTheDocument();
   });
 
-  it('opens the Find step and renders search results without crashing', async () => {
+  it('opens the catalog sheet from Find This Filament and searches inline', async () => {
     (api.searchBarcodeCatalog as ReturnType<typeof vi.fn>).mockResolvedValue([
       {
         source: 'ofd',
@@ -239,11 +239,13 @@ describe('BarcodeAddModal', () => {
     });
     render(<BarcodeAddModal {...baseProps} scan={unmatched} tagUid="0C1C8364" scaleWeight={1247} />);
 
+    // One entry point now: Find This Filament IS the catalog browser, with
+    // the keyword search inline in the sheet — no separate screen.
     fireEvent.click(await screen.findByRole('button', { name: /Find This Filament/i }));
-    // Find step should render (no crash on the transition)
+    expect(await screen.findByTestId('browse-sheet')).toBeInTheDocument();
     const input = await screen.findByPlaceholderText(/polymaker charcoal/i);
     fireEvent.change(input, { target: { value: 'polymaker' } });
-    // Debounced search result should render (this exercises the row + SourcePill)
+    // Debounced search result renders as a FilamentCard with its source pill.
     expect(await screen.findByText('Open Filament DB')).toBeInTheDocument();
   });
 
@@ -297,25 +299,20 @@ describe('BarcodeAddModal', () => {
     return screen.findByText('Baby Blue');
   }
 
-  it('find flow: select enables Confirm, and Back from confirm keeps all state', async () => {
+
+  it('search flow: tapping a result picks it, and Back from confirm keeps the search', async () => {
     (api.searchBarcodeCatalog as ReturnType<typeof vi.fn>).mockResolvedValue([mixedCodesRow]);
     const rowTitle = await openFindAndSearch();
 
-    const confirmBtn = screen.getByRole('button', { name: /^Confirm$/i });
-    expect(confirmBtn).toBeDisabled();
+    // Single tap picks the card — straight to the confirm screen.
     fireEvent.click(rowTitle);
-    expect(confirmBtn).not.toBeDisabled();
-    fireEvent.click(confirmBtn);
-
-    // Reached via Find → the confirm screen offers Back, not Cancel.
     expect(await screen.findByText('Confirm New Spool')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Cancel$/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /^Back$/i }));
 
-    // Query, results, and selection survive the round-trip.
+    // Query and results survive the round-trip.
     expect(await screen.findByDisplayValue('baby blue')).toBeInTheDocument();
-    expect(screen.getByText('Baby Blue')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Confirm$/i })).not.toBeDisabled();
+    expect(await screen.findByText('Baby Blue')).toBeInTheDocument();
   });
 
   it('find row Details discloses every code with its own refill flag', async () => {
@@ -331,8 +328,6 @@ describe('BarcodeAddModal', () => {
     expect(await screen.findByText('222')).toBeInTheDocument();
     expect(screen.getAllByText('111').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('Refill pack')).toHaveLength(1);
-    // Disclosure also selects the row.
-    expect(screen.getByRole('button', { name: /^Confirm$/i })).not.toBeDisabled();
   });
 
   it('offers "Find This Filament" on the scan-waiting screen (B) and Back returns there', async () => {
@@ -340,11 +335,12 @@ describe('BarcodeAddModal', () => {
     render(<BarcodeAddModal {...baseProps} scan={null} tagUid="0C1C8364" scaleWeight={1247} />);
     expect(await screen.findByText('Scan Barcode to Add')).toBeInTheDocument();
 
-    // The Find button jumps straight to the Find screen without needing a scan.
+    // The Find button opens the catalog sheet (with its inline search).
     fireEvent.click(screen.getByRole('button', { name: /Find This Filament/i }));
-    expect(await screen.findByPlaceholderText(/polymaker charcoal/i)).toBeInTheDocument();
+    expect(await screen.findByTestId('browse-sheet')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/polymaker charcoal/i)).toBeInTheDocument();
 
-    // Back returns to screen B (not the no-match screen it defaults to).
+    // Back at the sheet root returns to screen B.
     fireEvent.click(screen.getByRole('button', { name: /^Back$/i }));
     expect(await screen.findByText('Scan Barcode to Add')).toBeInTheDocument();
   });
@@ -451,7 +447,7 @@ describe('BarcodeAddModal', () => {
     mockBrowseTree();
     render(<BarcodeAddModal {...baseProps} scan={null} tagUid="0C1C8364" scaleWeight={1247} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /Browse Catalog/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Find This Filament/i }));
     // Brands level: owned brands surface in their own "Your brands" section.
     expect(await screen.findByText('Your brands')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Bambu Lab/ }));
@@ -479,7 +475,7 @@ describe('BarcodeAddModal', () => {
     mockBrowseTree();
     render(<BarcodeAddModal {...baseProps} scan={null} tagUid={null} scaleWeight={null} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /Browse Catalog/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Find This Filament/i }));
     await screen.findByText('Your brands');
     fireEvent.click(screen.getByRole('button', { name: /^Orange$/ }));
 
@@ -493,7 +489,7 @@ describe('BarcodeAddModal', () => {
     mockBrowseTree();
     render(<BarcodeAddModal {...baseProps} scan={null} tagUid="0C1C8364" scaleWeight={1247} />);
 
-    fireEvent.click(await screen.findByRole('button', { name: /Browse Catalog/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Find This Filament/i }));
     fireEvent.click(await screen.findByRole('button', { name: /Bambu Lab/ }));
     fireEvent.click(await screen.findByRole('button', { name: /PLA 212 colors/ }));
     fireEvent.click(await screen.findByRole('button', { name: /PLA Basic 48 colors/ }));
@@ -511,7 +507,7 @@ describe('BarcodeAddModal', () => {
     const { rerender } = render(
       <BarcodeAddModal {...baseProps} scan={null} tagUid="0C1C8364" scaleWeight={1247} />,
     );
-    fireEvent.click(await screen.findByRole('button', { name: /Browse Catalog/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Find This Filament/i }));
     await screen.findByText('Your brands');
 
     // The box lands in front of the scanner while the user is browsing.
@@ -522,16 +518,19 @@ describe('BarcodeAddModal', () => {
     expect(screen.getByText(/Matched in Open Filament Database/i)).toBeInTheDocument();
   });
 
-  it('browse: "Search by text instead" opens the keyboard search, and Back returns to browse', async () => {
+  it('browse: typing in the inline search swaps the body to results; Back restores browsing', async () => {
     mockBrowseTree();
+    (api.searchBarcodeCatalog as ReturnType<typeof vi.fn>).mockResolvedValue([pumpkinRow]);
     render(<BarcodeAddModal {...baseProps} scan={null} tagUid="0C1C8364" scaleWeight={1247} />);
-    fireEvent.click(await screen.findByRole('button', { name: /Browse Catalog/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Find This Filament/i }));
     await screen.findByText('Your brands');
 
-    fireEvent.click(screen.getByRole('button', { name: /Search by text instead/i }));
-    expect(await screen.findByPlaceholderText(/polymaker charcoal/i)).toBeInTheDocument();
+    // Type ≥2 chars → the body becomes search results in place, same sheet.
+    fireEvent.change(screen.getByPlaceholderText(/polymaker charcoal/i), { target: { value: 'pumpkin' } });
+    expect(await screen.findByText('Pumpkin Orange')).toBeInTheDocument();
+    expect(screen.queryByText('Your brands')).not.toBeInTheDocument();
 
-    // Back from the search returns to the browse sheet, not the scan screen.
+    // Back clears the search first, restoring the browse level underneath.
     fireEvent.click(screen.getByRole('button', { name: /^Back$/i }));
     expect(await screen.findByText('Your brands')).toBeInTheDocument();
   });
@@ -541,7 +540,7 @@ describe('BarcodeAddModal', () => {
       enabled: false, level: 'brands', brands: [], groups: [], colors: [], total: null,
     });
     render(<BarcodeAddModal {...baseProps} scan={null} tagUid={null} scaleWeight={null} />);
-    fireEvent.click(await screen.findByRole('button', { name: /Browse Catalog/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Find This Filament/i }));
     expect(await screen.findByText(/Community catalog lookups are turned off/i)).toBeInTheDocument();
   });
 

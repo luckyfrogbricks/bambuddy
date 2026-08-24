@@ -6590,8 +6590,6 @@ export default {
       noMatchBody: "Ce code n'est ni dans votre inventaire ni dans les bases de données communautaires. Les cartons Amazon portent souvent un code Amazon au lieu du code-barres commercial — cherchez un second code-barres sur la boîte.",
       addBasicSpool: "Ajouter une bobine simple",
       findFilament: "Trouver ce filament…",
-      findTitle: "Trouver ce filament",
-      findHint: "Recherchez par marque, matériau ou couleur, puis liez ce code-barres.",
       findPlaceholder: "ex. polymaker anthracite",
       findNoResults: "Aucune correspondance",
       chipTag: "Tag",
@@ -6639,7 +6637,6 @@ export default {
       hueMulticolor: 'Multicolore',
       hueGrayscale: 'Niveaux de gris',
       hueEarthTones: 'Tons terre',
-      browseSearchInstead: 'Rechercher par texte',
     },
     nav: {
       dashboard: 'Tableau de bord',
