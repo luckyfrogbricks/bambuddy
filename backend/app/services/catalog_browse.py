@@ -52,7 +52,7 @@ from backend.app.models.spool import Spool
 from backend.app.schemas.spool import LinkedCode
 from backend.app.services import spoolmandb_community_client
 from backend.app.services.barcode_resolver import BARCODE_FIELD_KEYS
-from backend.app.services.catalog_search import CatalogSearchRow
+from backend.app.services.catalog_search import CatalogSearchRow, clean_hexes
 from backend.app.services.spoolman import SpoolmanClient
 
 logger = logging.getLogger(__name__)
@@ -350,6 +350,7 @@ def _row_for(variant: dict) -> CatalogSearchRow:
     return CatalogSearchRow(
         source="spoolmandb-community",
         codes=[LinkedCode(**c) for c in codes],
+        hexes=clean_hexes(variant),
         **{k: variant.get(k) for k in BARCODE_FIELD_KEYS},
     )
 
@@ -363,6 +364,29 @@ def _preview_rgbas(variants: list[dict], count: int = 5) -> list[str]:
         if len(seen) >= count:
             break
     return seen
+
+
+async def scoped_variants(brand: str | None, material: str | None, line: str | None) -> list[dict]:
+    """Every (de-duplicated) variant inside a browse scope — the input the
+    ColorManager's family counts and partitioning run over."""
+    index = await _get_index()
+    if brand is not None:
+        canonical = index.brand_by_lower.get(brand.strip().lower())
+        if canonical is None:
+            return []
+        brands = [canonical]
+    else:
+        brands = list(index.tree.keys())
+    out: list[dict] = []
+    for b in brands:
+        for fam, lines in index.tree.get(b, {}).items():
+            if material is not None and fam != material:
+                continue
+            for node in lines.values():
+                if line is not None and node.label.lower() != line.strip().lower():
+                    continue
+                out.extend(node.variants)
+    return out
 
 
 async def browse_catalog(

@@ -49,8 +49,15 @@ from backend.app.services.barcode_resolver import (
     resolve_barcode,
     route_scanned_code,
 )
-from backend.app.services.catalog_browse import HUE_FAMILIES, CatalogBrowseResponse, browse_catalog, owned_brands
+from backend.app.services.catalog_browse import (
+    HUE_FAMILIES,
+    CatalogBrowseResponse,
+    browse_catalog,
+    owned_brands,
+    scoped_variants,
+)
 from backend.app.services.catalog_search import CatalogSearchRow, search_catalog
+from backend.app.services.color_manager import CatalogHuesResponse, family_counts, fixed_groups, partition
 from backend.app.services.location_service import (
     DUPLICATE_LOCATION_NAME,
     assign_location_name,
@@ -1436,6 +1443,38 @@ async def barcode_catalog_browse(
     client = await _ensure_spoolman_client(settings)
     owned = await owned_brands(db, client)
     return await browse_catalog(brand, material, line, hue, limit, owned)
+
+
+@router.get("/barcode/catalog-hues", response_model=CatalogHuesResponse)
+async def barcode_catalog_hues(
+    brand: str | None = Query(None, max_length=100),
+    material: str | None = Query(None, max_length=50),
+    line: str | None = Query(None, max_length=100),
+    count: int | None = Query(None, ge=1, le=12),
+    grayscale: bool = Query(False),
+    earth_tones: bool = Query(False),
+    multicolor: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    _: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_READ),
+):
+    """Hue-family groups for the ColorFilter over a browse scope.
+
+    Without ``count``: fixed mode — every family with its in-scope color
+    count, zeros included (the kiosk dims those dots). With ``count``:
+    adaptive mode — the ColorManager partitions the families present into
+    that many adjacency-guaranteed groups, honoring the reservation flags.
+    Same setting gate as catalog-browse; declared before /barcode/{barcode}.
+    """
+    settings = await _load_settings_map(db)
+    if not barcode_lookup_enabled(settings):
+        return CatalogHuesResponse(enabled=False, groups=[])
+    variants = await scoped_variants(brand, material, line)
+    counts = family_counts(variants, multicolor=multicolor)
+    if count is None:
+        groups = fixed_groups(counts, multicolor=multicolor)
+    else:
+        groups = partition(counts, count, grayscale=grayscale, earth_tones=earth_tones, multicolor=multicolor)
+    return CatalogHuesResponse(enabled=True, groups=groups)
 
 
 @router.get("/barcode/{barcode}", response_model=BarcodeLookupResponse)

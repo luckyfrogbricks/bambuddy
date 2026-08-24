@@ -12,6 +12,7 @@ stay in ``routes/inventory.py``; this module owns the search itself.
 """
 
 import logging
+import re
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -39,10 +40,29 @@ class CatalogSearchRow(BaseModel):
     subtype: str | None = None
     color_name: str | None = None
     rgba: str | None = None
+    # Multi-color hexes (bare 6-char, no '#') for dual/gradient filaments —
+    # None for single-color rows and for sources that don't carry them.
+    hexes: list[str] | None = None
     label_weight: int | None = None
     nozzle_temp_min: int | None = None
     nozzle_temp_max: int | None = None
     codes: list[LinkedCode] = []
+
+
+_HEX6_RE = re.compile(r"^[0-9a-fA-F]{6}")
+
+
+def clean_hexes(variant: dict) -> list[str] | None:
+    """A variant's multi-color hexes as bare 6-char values, or None.
+
+    This is what lets a dual-color like Velvet Eclipse render as its two real
+    colors instead of a lying solid swatch — the row-level plumbing the Color
+    Kit's multicolor fills depend on."""
+    hexes = variant.get("hexes")
+    if not isinstance(hexes, list):
+        return None
+    out = [h.lstrip("#")[:6] for h in hexes if isinstance(h, str) and _HEX6_RE.match(h.lstrip("#"))]
+    return out or None
 
 
 def catalog_match(tokens: list[str], *values: str | None) -> bool:
@@ -201,6 +221,7 @@ async def search_catalog(
                         CatalogSearchRow(
                             source="spoolmandb-community",
                             codes=[LinkedCode(**c) for c in codes],
+                            hexes=clean_hexes(variant),
                             **{k: variant.get(k) for k in BARCODE_FIELD_KEYS},
                         )
                     )
