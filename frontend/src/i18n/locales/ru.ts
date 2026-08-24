@@ -6281,6 +6281,10 @@ export default {
       hueBlack: 'Чёрный',
       hueGray: 'Серый',
       hueWhite: 'Белый',
+      hueMulticolor: 'Многоцветный',
+      hueGrayscale: 'Градации серого',
+      hueEarthTones: 'Земляные тона',
+      browseSearchInstead: 'Искать текстом',
     },
     nav: {
       dashboard: "Панель",

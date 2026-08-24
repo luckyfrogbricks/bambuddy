@@ -7,7 +7,8 @@ import { spoolColorString } from '../../utils/colors';
 import { RefillBadge } from '../RefillBadge';
 import { SpoolIcon } from './SpoolIcon';
 import { KioskToggle } from './KioskToggle';
-import { CatalogBrowsePanel, type BrowseNav } from './CatalogBrowsePanel';
+import { CatalogBrowseSheet, rowColors, rowTempRange, type BrowseNav } from './CatalogBrowseSheet';
+import { FilamentCard } from '../color';
 import { getDefaultCoreWeight } from './coreWeight';
 
 // NOTE: this is the SpoolBuddy (kiosk) add-to-inventory flow, driven entirely
@@ -572,15 +573,35 @@ export function BarcodeAddModal({
   const btnSecondary = `${btnBase} bg-zinc-700 text-zinc-300 hover:bg-zinc-600`;
   const btnGhost = `${btnBase} bg-transparent border border-zinc-600 text-zinc-400 hover:bg-zinc-700`;
 
+  // Browsing takes over the whole 1024×600 screen — a sheet, not a modal box.
+  if (step === 'browse') {
+    return (
+      <CatalogBrowseSheet
+        nav={browseNav}
+        onNavChange={setBrowseNav}
+        onPick={pickFromBrowse}
+        onExit={() => setStep(browseBackStep)}
+        onSearchInstead={() => {
+          setFindBackStep('browse');
+          setFindQuery('');
+          setFindRows([]);
+          setStep('find');
+        }}
+        tagUid={tagUid}
+        grossWeight={grossWeight}
+      />
+    );
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div
         className={`bg-zinc-800 rounded-2xl p-6 w-full border border-zinc-700 ${
-          step === 'browse' ? 'max-w-3xl' : 'max-w-lg'
+          step === 'find' ? 'max-w-3xl' : 'max-w-lg'
         }`}
       >
-        {/* --- Chips: tag + scale (shared header for scan/browse/confirm) --- */}
-        {(step === 'waiting' || step === 'confirm' || step === 'looking_up' || step === 'browse') && (
+        {/* --- Chips: tag + scale (shared header for scan/confirm) --- */}
+        {(step === 'waiting' || step === 'confirm' || step === 'looking_up') && (
           <div className="flex flex-wrap gap-2 mb-4">
             <Chip
               ok={!!tagUid}
@@ -969,16 +990,6 @@ export function BarcodeAddModal({
           </>
         )}
 
-        {/* --- Screen G: browse catalog (tap-first, no keyboard) --- */}
-        {step === 'browse' && (
-          <CatalogBrowsePanel
-            nav={browseNav}
-            onNavChange={setBrowseNav}
-            onPick={pickFromBrowse}
-            onExit={() => setStep(browseBackStep)}
-          />
-        )}
-
         {/* --- Screen F: find this filament --- */}
         {step === 'find' && (
           <>
@@ -999,88 +1010,43 @@ export function BarcodeAddModal({
                 placeholder={t('spoolbuddy.barcode.findPlaceholder', 'e.g. polymaker charcoal')}
               />
             </div>
-            <div className="max-h-64 overflow-y-auto flex flex-col gap-2 mb-5">
+            <div className="max-h-72 overflow-y-auto mb-5">
               {findLoading && <p className="text-sm text-zinc-500 text-center py-4">{t('common.loading', 'Loading…')}</p>}
               {!findLoading && findQuery.trim().length >= 2 && displayRows.length === 0 && (
                 <p className="text-sm text-zinc-500 text-center py-4">
                   {t('spoolbuddy.barcode.findNoResults', 'No matches found')}
                 </p>
               )}
-              {displayRows.map((row, i) => (
-                <div
-                  key={`${row.source}-${row.spool_id ?? i}-${i}`}
-                  className={`rounded-lg border transition-colors ${
-                    findSelectedIdx === i
-                      ? 'bg-green-500/10 border-green-500/60'
-                      : 'bg-zinc-900/60 border-zinc-700 hover:border-green-500/50'
-                  }`}
-                >
-                  <div
-                    className="flex items-center gap-3 p-3 cursor-pointer"
+              {/* Results as FilamentCards (the Color Kit organism): tap to
+                  select, Details discloses every code with its refill flag so
+                  visually identical twins stay tellable apart. */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {displayRows.map((row, i) => (
+                  <FilamentCard
+                    key={`${row.source}-${row.spool_id ?? i}-${i}`}
+                    colors={rowColors(row)}
+                    title={row.color_name ?? row.subtype ?? row.material ?? ''}
+                    subtitle={[row.brand, row.subtype || row.material].filter(Boolean).join(' · ')}
+                    source={row.source}
+                    weight={row.label_weight}
+                    tempRange={rowTempRange(row)}
+                    primaryCode={row.codes[0]?.code ?? null}
+                    badge={
+                      row.codes.length > 0 && row.codes.every((c) => c.is_refill) ? (
+                        <RefillBadge />
+                      ) : undefined
+                    }
+                    codes={row.codes}
+                    expanded={findExpandedIdx === i}
+                    onToggleExpand={() => {
+                      setFindSelectedIdx(i);
+                      setFindExpandedIdx((v) => (v === i ? null : i));
+                    }}
+                    selected={findSelectedIdx === i}
                     onClick={() => setFindSelectedIdx(i)}
-                  >
-                    <span
-                      className="w-6 h-6 rounded-full border-2 border-zinc-600 shrink-0"
-                      style={{ backgroundColor: spoolColorString(row.rgba) }}
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5 text-sm font-medium text-zinc-100">
-                        {findSelectedIdx === i && <Check className="w-4 h-4 shrink-0 text-green-500" />}
-                        <span className="truncate">
-                          {[row.color_name, row.subtype || row.material].filter(Boolean).join(' — ')}
-                        </span>
-                        {/* Only a pure-refill row gets the badge — SpoolmanDB
-                            variants usually merge with-spool AND refill codes
-                            into one row, so per-code flags live in Details. */}
-                        {row.codes.length > 0 && row.codes.every((c) => c.is_refill) && (
-                          <RefillBadge className="shrink-0" />
-                        )}
-                      </div>
-                      <div className="text-xs text-zinc-500 truncate">
-                        {[row.brand, row.label_weight ? `${row.label_weight} g` : null].filter(Boolean).join(' • ')}
-                        {row.codes[0] && <span className="font-mono"> • {row.codes[0].code}</span>}
-                      </div>
-                    </div>
-                    <SourcePill source={row.source} t={t} />
-                    {/* Disclosure: selects the row and reveals every property,
-                        so visually identical twins become tellable apart. */}
-                    <button
-                      type="button"
-                      aria-label={t('spoolbuddy.barcode.details', 'Details')}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setFindSelectedIdx(i);
-                        setFindExpandedIdx((v) => (v === i ? null : i));
-                      }}
-                      className="shrink-0 p-1.5 rounded-full text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700 transition-colors"
-                    >
-                      {findExpandedIdx === i ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  {findExpandedIdx === i && (
-                    <div className="px-3 pb-3 pt-1 border-t border-zinc-700/60 text-xs space-y-1.5">
-                      <div className="flex flex-wrap gap-x-5 gap-y-1 text-zinc-400">
-                        <span>{[row.brand, row.material, row.subtype].filter(Boolean).join(' • ')}</span>
-                        {row.label_weight != null && <span>{row.label_weight} g</span>}
-                        {row.nozzle_temp_min != null && row.nozzle_temp_max != null && (
-                          <span>
-                            {t('spoolbuddy.barcode.nozzleTemp', 'Nozzle temp')} {row.nozzle_temp_min}–{row.nozzle_temp_max} °C
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex flex-col gap-1">
-                        {row.codes.map((c) => (
-                          <span key={c.code} className="flex items-center gap-2 text-zinc-300">
-                            <span className="font-mono">{c.code}</span>
-                            <span className="uppercase text-[10px] text-zinc-500">{c.kind}</span>
-                            {c.is_refill && <RefillBadge />}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
+                  />
+                ))}
+              </div>
             </div>
             <div className="flex gap-2">
               <button type="button" className={btnGhost} onClick={() => setStep(findBackStep)}>
@@ -1122,29 +1088,5 @@ function Row({ k, v }: { k: string; v: string }) {
       <span className="text-zinc-500">{k}</span>
       <span className="font-mono text-zinc-300 truncate">{v}</span>
     </div>
-  );
-}
-
-function SourcePill({
-  source,
-  t,
-}: {
-  source: CatalogSearchRow['source'];
-  t: (key: string, fallback: string) => string;
-}) {
-  const map: Record<CatalogSearchRow['source'], { label: string; cls: string }> = {
-    inventory: {
-      label: t('spoolbuddy.barcode.pillInventory', 'Your inventory'),
-      cls: 'text-green-400 border-green-500/35',
-    },
-    ofd: { label: t('spoolbuddy.barcode.pillOfd', 'Open Filament DB'), cls: 'text-green-400 border-green-500/30' },
-    'spoolmandb-community': {
-      label: t('spoolbuddy.barcode.pillSpoolmandb', 'SpoolmanDB'),
-      cls: 'text-zinc-400 border-zinc-600',
-    },
-  };
-  const { label, cls } = map[source];
-  return (
-    <span className={`shrink-0 text-xs font-medium px-2.5 py-1 rounded-full border ${cls}`}>{label}</span>
   );
 }

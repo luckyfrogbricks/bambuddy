@@ -6634,6 +6634,10 @@ export default {
       hueBlack: '黑',
       hueGray: '灰',
       hueWhite: '白',
+      hueMulticolor: '多色',
+      hueGrayscale: '灰階',
+      hueEarthTones: '大地色',
+      browseSearchInstead: '改用文字搜尋',
     },
     nav: {
       dashboard: '儀表板',

@@ -3490,6 +3490,8 @@ export interface CatalogSearchRow {
   subtype: string | null;
   color_name: string | null;
   rgba: string | null;
+  /** Multi-color hexes (bare 6-char) for dual/gradient filaments; null otherwise. */
+  hexes?: string[] | null;
   label_weight: number | null;
   nozzle_temp_min: number | null;
   nozzle_temp_max: number | null;
@@ -3522,6 +3524,18 @@ export interface CatalogBrowseGroup {
   name: string;
   variant_count: number;
   preview_rgbas: string[];
+}
+
+/** One ColorFilter dot's worth of hue families, from the backend ColorManager. */
+export interface CatalogHueGroup {
+  families: string[];
+  count: number;
+  kind: 'hues' | 'grayscale' | 'earth-tones' | 'multicolor';
+}
+
+export interface CatalogHuesResponse {
+  enabled: boolean;
+  groups: CatalogHueGroup[];
 }
 
 export interface CatalogBrowseResponse {
@@ -6244,6 +6258,18 @@ export const api = {
     if (params.hue) qs.set('hue', params.hue);
     const suffix = qs.toString();
     return request<CatalogBrowseResponse>(`/inventory/barcode/catalog-browse${suffix ? `?${suffix}` : ''}`);
+  },
+  // Hue-family groups for the ColorFilter over a browse scope (fixed mode
+  // when count is omitted — every family with its in-scope count, zeros
+  // included so the rail can dim them).
+  browseCatalogHues: (params: { brand?: string; material?: string; line?: string; count?: number }) => {
+    const qs = new URLSearchParams();
+    if (params.brand) qs.set('brand', params.brand);
+    if (params.material) qs.set('material', params.material);
+    if (params.line) qs.set('line', params.line);
+    if (params.count !== undefined) qs.set('count', String(params.count));
+    const suffix = qs.toString();
+    return request<CatalogHuesResponse>(`/inventory/barcode/catalog-hues${suffix ? `?${suffix}` : ''}`);
   },
   // ── CSV import/export (#1576) ────────────────────────────────────────────
   // dry_run=true → preview (no write); omitted → real import. Both share one

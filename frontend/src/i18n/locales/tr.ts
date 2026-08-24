@@ -6590,6 +6590,10 @@ export default {
       hueBlack: 'Siyah',
       hueGray: 'Gri',
       hueWhite: 'Beyaz',
+      hueMulticolor: 'Çok renkli',
+      hueGrayscale: 'Gri tonlama',
+      hueEarthTones: 'Toprak tonları',
+      browseSearchInstead: 'Metinle ara',
     },
     nav: {
       dashboard: 'Gösterge Paneli',

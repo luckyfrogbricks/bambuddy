@@ -6636,6 +6636,10 @@ export default {
       hueBlack: 'Noir',
       hueGray: 'Gris',
       hueWhite: 'Blanc',
+      hueMulticolor: 'Multicolore',
+      hueGrayscale: 'Niveaux de gris',
+      hueEarthTones: 'Tons terre',
+      browseSearchInstead: 'Rechercher par texte',
     },
     nav: {
       dashboard: 'Tableau de bord',

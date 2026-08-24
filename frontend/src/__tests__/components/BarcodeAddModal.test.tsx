@@ -25,6 +25,11 @@ vi.mock('../../api/client', () => ({
     browseBarcodeCatalog: vi.fn().mockResolvedValue({
       enabled: true, level: 'brands', brands: [], groups: [], colors: [], total: null,
     }),
+    browseCatalogHues: vi.fn().mockResolvedValue({
+      enabled: true,
+      groups: ['red', 'orange', 'brown', 'yellow', 'green', 'blue', 'purple', 'pink', 'black', 'gray', 'white']
+        .map((f) => ({ families: [f], count: 1, kind: 'hues' })),
+    }),
     getLocations: vi.fn().mockResolvedValue([]),
     createLocation: vi.fn(),
   },
@@ -289,7 +294,7 @@ describe('BarcodeAddModal', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Find This Filament/i }));
     const input = await screen.findByPlaceholderText(/polymaker charcoal/i);
     fireEvent.change(input, { target: { value: 'baby blue' } });
-    return screen.findByText('Baby Blue — PLA Pure');
+    return screen.findByText('Baby Blue');
   }
 
   it('find flow: select enables Confirm, and Back from confirm keeps all state', async () => {
@@ -309,7 +314,7 @@ describe('BarcodeAddModal', () => {
 
     // Query, results, and selection survive the round-trip.
     expect(await screen.findByDisplayValue('baby blue')).toBeInTheDocument();
-    expect(screen.getByText('Baby Blue — PLA Pure')).toBeInTheDocument();
+    expect(screen.getByText('Baby Blue')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^Confirm$/i })).not.toBeDisabled();
   });
 
@@ -322,8 +327,9 @@ describe('BarcodeAddModal', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /^Details$/i }));
     // … but the disclosure lists both codes, flagging only the refill one.
+    // ('111' also shows collapsed as the card's primary code, hence getAllBy.)
     expect(await screen.findByText('222')).toBeInTheDocument();
-    expect(screen.getByText('111')).toBeInTheDocument();
+    expect(screen.getAllByText('111').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('Refill pack')).toHaveLength(1);
     // Disclosure also selects the row.
     expect(screen.getByRole('button', { name: /^Confirm$/i })).not.toBeDisabled();
@@ -477,9 +483,9 @@ describe('BarcodeAddModal', () => {
     await screen.findByText('Your brands');
     fireEvent.click(screen.getByRole('button', { name: /^Orange$/ }));
 
-    // Hue results render as context rows (brand • line) with the capped total.
+    // Hue results render as FilamentCards (brand · line) with the capped total.
     expect(await screen.findByText('Pumpkin Orange')).toBeInTheDocument();
-    expect(screen.getByText(/Bambu Lab • PLA Basic/)).toBeInTheDocument();
+    expect(screen.getByText(/Bambu Lab · PLA Basic/)).toBeInTheDocument();
     expect(screen.getByText(/Showing 1 of 88/)).toBeInTheDocument();
   });
 
@@ -514,6 +520,20 @@ describe('BarcodeAddModal', () => {
     );
     expect(await screen.findByText('Charcoal Black')).toBeInTheDocument();
     expect(screen.getByText(/Matched in Open Filament Database/i)).toBeInTheDocument();
+  });
+
+  it('browse: "Search by text instead" opens the keyboard search, and Back returns to browse', async () => {
+    mockBrowseTree();
+    render(<BarcodeAddModal {...baseProps} scan={null} tagUid="0C1C8364" scaleWeight={1247} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Browse Catalog/i }));
+    await screen.findByText('Your brands');
+
+    fireEvent.click(screen.getByRole('button', { name: /Search by text instead/i }));
+    expect(await screen.findByPlaceholderText(/polymaker charcoal/i)).toBeInTheDocument();
+
+    // Back from the search returns to the browse sheet, not the scan screen.
+    fireEvent.click(screen.getByRole('button', { name: /^Back$/i }));
+    expect(await screen.findByText('Your brands')).toBeInTheDocument();
   });
 
   it('browse: explains when community lookups are disabled', async () => {

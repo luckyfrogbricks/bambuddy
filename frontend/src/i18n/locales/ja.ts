@@ -6647,6 +6647,10 @@ export default {
       hueBlack: '黒',
       hueGray: 'グレー',
       hueWhite: '白',
+      hueMulticolor: 'マルチカラー',
+      hueGrayscale: 'グレースケール',
+      hueEarthTones: 'アースカラー',
+      browseSearchInstead: 'テキストで検索',
     },
     nav: {
       dashboard: 'ダッシュボード',

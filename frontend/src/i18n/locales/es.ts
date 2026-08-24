@@ -6654,6 +6654,10 @@ export default {
       hueBlack: 'Negro',
       hueGray: 'Gris',
       hueWhite: 'Blanco',
+      hueMulticolor: 'Multicolor',
+      hueGrayscale: 'Escala de grises',
+      hueEarthTones: 'Tonos tierra',
+      browseSearchInstead: 'Buscar por texto',
     },
     nav: {
       dashboard: 'Panel',

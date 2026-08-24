@@ -6635,6 +6635,10 @@ export default {
       hueBlack: 'Preto',
       hueGray: 'Cinza',
       hueWhite: 'Branco',
+      hueMulticolor: 'Multicolorido',
+      hueGrayscale: 'Escala de cinza',
+      hueEarthTones: 'Tons terrosos',
+      browseSearchInstead: 'Buscar por texto',
     },
     nav: {
       dashboard: 'Painel',

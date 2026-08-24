@@ -6689,6 +6689,10 @@ export default {
       hueBlack: 'Чорний',
       hueGray: 'Сірий',
       hueWhite: 'Білий',
+      hueMulticolor: 'Багатоколірний',
+      hueGrayscale: 'Відтінки сірого',
+      hueEarthTones: 'Земляні тони',
+      browseSearchInstead: 'Шукати текстом',
     },
     nav: {
       dashboard: "Приладова панель",

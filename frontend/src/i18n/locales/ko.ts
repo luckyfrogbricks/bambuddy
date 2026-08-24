@@ -6293,6 +6293,10 @@ export default {
       hueBlack: '검정',
       hueGray: '회색',
       hueWhite: '흰색',
+      hueMulticolor: '멀티컬러',
+      hueGrayscale: '그레이스케일',
+      hueEarthTones: '어스 톤',
+      browseSearchInstead: '텍스트로 검색',
     },
     nav: {
       dashboard: '대시보드',

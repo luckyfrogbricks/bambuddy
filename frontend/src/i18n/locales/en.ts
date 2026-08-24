@@ -6697,6 +6697,10 @@ export default {
       hueBlack: 'Black',
       hueGray: 'Gray',
       hueWhite: 'White',
+      hueMulticolor: 'Multicolor',
+      hueGrayscale: 'Grayscale',
+      hueEarthTones: 'Earth tones',
+      browseSearchInstead: 'Search by text instead',
     },
     nav: {
       dashboard: 'Dashboard',
