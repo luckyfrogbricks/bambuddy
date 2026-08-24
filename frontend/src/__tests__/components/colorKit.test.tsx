@@ -43,6 +43,14 @@ describe('colorFill', () => {
     expect(colorFill(['nope'], 'gradient')).toEqual({ background: '#808080' });
   });
 
+  it('puts a checkerboard under translucent fills (Clear must not render black)', () => {
+    const clear = colorFill('FFFFFF40', 'gradient');
+    expect(clear.backgroundImage).toContain('repeating-conic-gradient');
+    expect(clear.backgroundImage).toContain('#FFFFFF40');
+    // Opaque solids stay plain backgrounds — no layering.
+    expect(colorFill('FF9016', 'gradient')).toEqual({ background: '#FF9016' });
+  });
+
   it('gives reserved groups their signature ramps', () => {
     expect(groupFill({ families: ['black', 'gray', 'white'], kind: 'grayscale' }).background).toContain(
       'linear-gradient',

@@ -480,3 +480,55 @@ class TestCachingAndLookup:
 
         with pytest.raises(RuntimeError, match="zero manufacturer files"):
             await smdb.download_and_build_payload()
+
+
+class TestTranslucentAlpha:
+    """v4: the source's translucency flag lands in the alpha byte so every
+    renderer can show it (upstream publishes translucent colors opaque —
+    Bambu's colorless "Clear" is literally opaque black there, which made a
+    clear spool render as solid black on the kiosk)."""
+
+    FILE = {
+        "manufacturer": "Bambu Lab",
+        "filaments": [
+            {
+                "material": "PETG",
+                "name": "PETG Translucent {color_name}",
+                "translucent": True,
+                "colors": [
+                    {"name": "Clear", "hex": "#000000"},
+                    {"name": "Orange", "hex": "#FF911A"},
+                ],
+            },
+            {
+                "material": "PLA",
+                "name": "PLA Basic {color_name}",
+                "colors": [
+                    {"name": "Black", "hex": "#000000"},
+                    # Per-color flag overrides the filament-level default.
+                    {"name": "Smoke", "hex": "#333333", "translucent": True},
+                ],
+            },
+        ],
+    }
+
+    def test_colorless_clear_becomes_near_invisible_white(self):
+        variants = smdb._parse_manufacturer_file("Bambu Lab", self.FILE)
+        v = next(v for v in variants if v["color_name"] == "Clear")
+        assert v["rgba"] == "FFFFFF40"
+        assert v["translucent"] is True
+
+    def test_translucent_color_keeps_rgb_at_half_alpha(self):
+        variants = smdb._parse_manufacturer_file("Bambu Lab", self.FILE)
+        v = next(v for v in variants if v["color_name"] == "Orange")
+        assert v["rgba"] == "FF911A80"
+
+    def test_opaque_color_untouched(self):
+        variants = smdb._parse_manufacturer_file("Bambu Lab", self.FILE)
+        v = next(v for v in variants if v["color_name"] == "Black")
+        assert v["rgba"] == "000000FF"
+
+    def test_per_color_flag_wins(self):
+        variants = smdb._parse_manufacturer_file("Bambu Lab", self.FILE)
+        v = next(v for v in variants if v["color_name"] == "Smoke")
+        assert v["rgba"] == "33333380"

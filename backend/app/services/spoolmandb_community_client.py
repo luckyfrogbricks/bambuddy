@@ -142,6 +142,21 @@ def _parse_manufacturer_file(manufacturer: str, data: dict) -> list[dict]:
             color_name = color.get("name")
             hexes = color.get("hexes")
             rgba = hex_to_rgba(color.get("hex") or hexes)
+            translucent = color.get("translucent", filament.get("translucent"))
+            # Carry the source's translucency into the alpha byte so every
+            # renderer (FilamentSwatch checkerboard, kiosk glass treatment)
+            # can show it — upstream publishes translucent colors fully
+            # opaque. Two cases:
+            #   - a colorless "Clear"/"Transparent" published as opaque BLACK
+            #     (Bambu PETG Translucent Clear = 000000FF upstream) becomes
+            #     near-invisible white — without this a clear spool renders
+            #     as solid black;
+            #   - any other translucent color keeps its RGB at half alpha.
+            if rgba and translucent and rgba.upper().endswith("FF"):
+                if (color_name or "").strip().lower() in ("clear", "transparent") and rgba[:6] == "000000":
+                    rgba = "FFFFFF40"
+                else:
+                    rgba = rgba[:6] + "80"
 
             variants.append(
                 {
@@ -157,7 +172,7 @@ def _parse_manufacturer_file(manufacturer: str, data: dict) -> list[dict]:
                     "nozzle_temp_max": nozzle_temp_max,
                     "finish": color.get("finish", filament.get("finish")),
                     "pattern": color.get("pattern", filament.get("pattern")),
-                    "translucent": color.get("translucent", filament.get("translucent")),
+                    "translucent": translucent,
                     "glow": color.get("glow", filament.get("glow")),
                     "multi_color_direction": color.get("multi_color_direction", filament.get("multi_color_direction")),
                     "eans": _as_list(color.get("eans")),
@@ -284,7 +299,9 @@ class _SpoolmanDbCommunityClient(CachedCatalogClient):
     cache_filename = "spoolmandb_community_cache.json"
     # Bump whenever the payload shape changes, so an old cache file is treated
     # as stale and rebuilt instead of being misread.
-    cache_version = 3
+    # v4: translucent colors carry their translucency in the alpha byte
+    # (colorless "Clear" published as opaque black becomes FFFFFF40).
+    cache_version = 4
 
     def seed_path(self) -> Path:
         # backend/seeds/spoolmandb_community_seed.json — generated at Docker

@@ -16,12 +16,32 @@ import { FAMILY_DOT_HEX, type HueFamily } from './families';
 
 export type FillPresentation = 'gradient' | 'slash-striped' | 'backslash-striped' | 'vertical-striped';
 
+// The transparency checkerboard shown UNDER any fill with a non-opaque stop,
+// so translucent filament (Clear at #FFFFFF40) reads as glass instead of the
+// surface behind it — same convention as the web app's FilamentSwatch.
+const CHECKERBOARD = 'repeating-conic-gradient(#979797 0% 25%, #f5f5f5 0% 50%)';
+const CHECKERBOARD_TILE = '12px 12px';
+
 function normalize(colors: string | string[]): string[] {
   const list = Array.isArray(colors) ? colors : [colors];
   return list
-    .map((c) => c.replace(/^#/, '').slice(0, 6))
-    .filter((c) => /^[0-9a-fA-F]{6}$/.test(c))
+    .map((c) => c.replace(/^#/, ''))
+    .map((c) => (/^[0-9a-fA-F]{8}$/.test(c) ? c : c.slice(0, 6)))
+    .filter((c) => /^[0-9a-fA-F]{6}$|^[0-9a-fA-F]{8}$/.test(c))
     .map((c) => `#${c}`);
+}
+
+function hasTranslucentStop(stops: string[]): boolean {
+  return stops.some((s) => s.length === 9 && s.slice(7, 9).toLowerCase() !== 'ff');
+}
+
+/** Compose the color layer over the checkerboard when any stop is translucent. */
+function layered(colorLayer: string, translucent: boolean): CSSProperties {
+  if (!translucent) return { background: colorLayer };
+  return {
+    backgroundImage: `${colorLayer}, ${CHECKERBOARD}`,
+    backgroundSize: `cover, ${CHECKERBOARD_TILE}`,
+  };
 }
 
 export function colorFill(
@@ -30,11 +50,17 @@ export function colorFill(
 ): CSSProperties {
   const stops = normalize(colors);
   if (stops.length === 0) return { background: '#808080' };
-  if (stops.length === 1) return { background: stops[0] };
+  const translucent = hasTranslucentStop(stops);
+  if (stops.length === 1) {
+    if (!translucent) return { background: stops[0] };
+    // A translucent solid still needs the checkerboard under it, which
+    // requires the gradient form (background-image layers).
+    return layered(`linear-gradient(${stops[0]}, ${stops[0]})`, true);
+  }
 
   if (presentation === 'gradient') {
     const parts = stops.map((c, i) => `${c} ${((i / (stops.length - 1)) * 100).toFixed(1)}%`);
-    return { background: `linear-gradient(135deg, ${parts.join(', ')})` };
+    return layered(`linear-gradient(135deg, ${parts.join(', ')})`, translucent);
   }
 
   const angle =
@@ -45,7 +71,7 @@ export function colorFill(
     const to = (((i + 1) / n) * 100).toFixed(2);
     return `${c} ${from}% ${to}%`;
   });
-  return { background: `linear-gradient(${angle}, ${parts.join(', ')})` };
+  return layered(`linear-gradient(${angle}, ${parts.join(', ')})`, translucent);
 }
 
 // Special fills for reserved filter groups (see ColorManager kinds).
