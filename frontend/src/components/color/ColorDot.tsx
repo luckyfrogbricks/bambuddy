@@ -53,8 +53,11 @@ export function ColorDot({
       />
       {showLabel && (
         <span
+          // A label naming a color never renders in a non-neutral color (a
+          // green "Brown" lies about its subject) — active brightens the
+          // neutral toward white instead; the indicator bar carries the green.
           className={`text-[10px] leading-tight text-center max-w-[64px] truncate ${
-            active ? 'text-green-400 font-semibold' : dimmed ? 'text-zinc-600' : 'text-zinc-400'
+            active ? 'text-zinc-100 font-semibold' : dimmed ? 'text-zinc-600' : 'text-zinc-400'
           }`}
         >
           {label}

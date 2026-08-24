@@ -61,8 +61,10 @@ export function ColorSwatch({
         <span aria-hidden className="block w-full h-11 rounded-lg border border-white/15" style={fill} />
         {label && (
           <span
+            // Color-name labels stay neutral (see ColorDot): selection
+            // brightens toward white; the indicator bar carries the green.
             className={`block text-[11px] leading-tight truncate text-center ${
-              selected ? 'text-green-400 font-semibold' : 'text-zinc-300'
+              selected ? 'text-zinc-100 font-semibold' : 'text-zinc-300'
             }`}
           >
             {label}

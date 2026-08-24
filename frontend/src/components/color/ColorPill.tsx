@@ -27,8 +27,11 @@ export function ColorPill({
   onClick,
 }: ColorPillProps) {
   const fill = fillStyle ?? colorFill(colors, presentation);
+  // Active keeps the green tint on the CHROME (fill + border) but the label
+  // stays neutral, brightened — a color-name label never renders in a
+  // non-neutral color ("Brown" in green would lie about its subject).
   const stateClass = active
-    ? 'bg-green-500/10 border-green-500/60 text-green-300'
+    ? 'bg-green-500/10 border-green-500/60 text-zinc-100 font-semibold'
     : 'bg-zinc-700 border-zinc-600 text-zinc-300';
   const body = (
     <>
