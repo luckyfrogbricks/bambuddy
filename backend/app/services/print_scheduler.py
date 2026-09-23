@@ -30,14 +30,16 @@ from backend.app.models.spool_assignment import SpoolAssignment
 from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
 from backend.app.services import drying_preflight, print_dispatch_context
 from backend.app.services.bambu_ftp import (
+    FtpFailureReport,
     UploadCancelled,
     cache_3mf_download,
     delete_file_async,
+    describe_upload_failure,
     get_ftp_retry_settings,
     upload_file_async,
     with_ftp_retry,
 )
-from backend.app.services.bambu_mqtt import HMS_MQTT_VERIFY_FAILED, resolve_rack_plan_mapping
+from backend.app.services.bambu_mqtt import _RACK_NOZZLE_IDS, HMS_MQTT_VERIFY_FAILED, resolve_rack_plan_mapping
 from backend.app.services.filament_deficit import compute_deficit_for_queue_item
 from backend.app.services.finance_budget import (
     create_budget_reservation,
@@ -463,6 +465,63 @@ def _mapping_is_all_unresolved(mapping: list | None) -> bool:
     return all(t is None or (isinstance(t, int) and t < 0) for t in mapping)
 
 
+# Global tray ids at or above this are the external spool(s), not an AMS slot:
+# 254 is the deputy feed and 255 the main one. Mirrors the sentinel documented
+# on `_mapping_is_all_unresolved`.
+_EXTERNAL_TRAY_ID_MIN = 254
+
+
+def _int_or(value, default: int) -> int:
+    """``int(value)``, or ``default`` when the field is missing or junk.
+
+    AMS telemetry types its ids inconsistently — `"0"` in one firmware, `0` in
+    the next — and a tray id that fails to parse must not take the whole
+    derivation down with it.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _global_tray_id(ams_id: int, tray_id: int) -> int:
+    """Bambu's flat tray addressing: ``ams_id * 4 + tray_id`` for a four-slot
+    unit, and the bare unit id for an AMS-HT (ids from 128, one tray each).
+
+    Mirrors the calculation in ``_build_loaded_filaments``, which is what
+    produces the ids stored in ``PrintQueueItem.ams_mapping`` — the two must
+    agree or a mapping cannot be read back against live tray telemetry.
+    """
+    return ams_id if ams_id >= 128 else ams_id * 4 + tray_id
+
+
+def _used_global_tray_ids(item: PrintQueueItem | None) -> set[int] | None:
+    """The global tray ids ``item`` actually prints from, or None if unknown.
+
+    ``ams_mapping`` is the array the print command carries: position = filament
+    slot, value = global tray id, ``-1`` / ``None`` for a slot this plate does
+    not use. None means "no usable statement" — no mapping, unparseable JSON,
+    an all-unresolved mapping (the artifact ``_mapping_is_all_unresolved``
+    documents), or one that resolves to no tray at all. Callers must treat None
+    as "consider every loaded tray" rather than "consider none": narrowing on
+    an absent mapping would silently drop requirements the print really has.
+    """
+    raw = getattr(item, "ams_mapping", None)
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        try:
+            mapping = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    else:
+        mapping = raw
+    if not isinstance(mapping, list) or _mapping_is_all_unresolved(mapping):
+        return None
+    used = {t for t in mapping if isinstance(t, int) and not isinstance(t, bool) and t >= 0}
+    return used or None
+
+
 def _mqtt_commands_rejected(status) -> bool:
     """True when the printer is currently reporting that it refused a command.
 
@@ -510,30 +569,138 @@ def _drying_ams_ids(status) -> list[int]:
     return ids
 
 
+def _parse_diameter(raw) -> float | None:
+    """``"0.4"`` → ``0.4``; anything unparseable or non-positive → None."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _nozzle_info_by_id(status) -> dict[int, dict]:
+    """Index ``PrinterState.nozzle_rack`` by nozzle id.
+
+    The field name is historical: on the H2 series ``nozzle_info`` carries an
+    entry for *every* nozzle the printer knows about — the L/R hotends under
+    ids 0/1 and, on a rack model, the dock positions under ids 16-21. Only the
+    latter are the rack proper; :func:`_rack_nozzle_diameters` and
+    :func:`_installed_nozzle_diameters` each take the half they need.
+    """
+    by_id: dict[int, dict] = {}
+    for entry in getattr(status, "nozzle_rack", None) or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            by_id[int(entry.get("id"))] = entry
+        except (TypeError, ValueError):
+            continue
+    return by_id
+
+
+# What the firmware puts in a nozzle's serial number when the carriage or dock
+# is empty. Measured on an H2C at idle, where the rack-side hotend had parked
+# its nozzle back in the rack (#2885).
+_EMPTY_NOZZLE_SERIAL = "N/A"
+
+
+def _nozzle_is_mounted(entry: dict | None) -> bool:
+    """Whether a ``nozzle_info`` entry describes hardware that is actually there.
+
+    A hotend entry is reported whether or not a nozzle is mounted, and an empty
+    carriage keeps the *last* nozzle's diameter — measured on an H2C at idle,
+    where id 1 read ``diameter "0.4"`` with ``max_temp 0``, ``serial_number
+    "N/A"`` and ``wear 0`` because that hotend had parked its nozzle back in
+    the dock. So the diameter is not a presence signal (#2885).
+
+    Emptiness has to be stated, not merely unstated. The serial must be the
+    firmware's explicit ``"N/A"`` marker *and* the temperature rating must be
+    absent — an empty serial only means the printer didn't say, and a firmware
+    that reports neither field normalises to exactly that. Treating "didn't
+    say" as "empty" would silently switch the #1899 guard off on any such
+    machine, so everything we cannot positively call empty counts as mounted.
+    """
+    if entry is None:
+        return True
+    serial = str(entry.get("serial_number") or "").strip().upper()
+    if serial != _EMPTY_NOZZLE_SERIAL:
+        return True
+    try:
+        max_temp = float(entry.get("max_temp") or 0)
+    except (TypeError, ValueError):
+        return True
+    return max_temp > 0
+
+
 def _installed_nozzle_diameters(status) -> list[float]:
-    """Parse the installed nozzle diameters from a PrinterState (#1899).
+    """Parse the mounted nozzle diameters from a PrinterState (#1899).
 
     Returns the diameters the printer actually reports (e.g. [0.4] single-nozzle,
     [0.4, 0.6] dual-nozzle), skipping the empty-string defaults that populate a
     NozzleInfo before MQTT fills it in. An empty list means "the printer hasn't
     told us its nozzle hardware" — callers must treat that as unknown, not as a
     mismatch, so we never block a print on missing data.
+
+    A hotend whose ``nozzle_info`` entry says nothing is mounted is skipped even
+    though ``nozzles`` still carries a diameter for it: that value is stale, and
+    counting it would let a slice match a nozzle the machine does not have
+    (#2885). Printers that report no ``nozzle_info`` at all are unaffected.
     """
+    info = _nozzle_info_by_id(status)
     diameters: list[float] = []
-    for nozzle in getattr(status, "nozzles", None) or []:
+    for index, nozzle in enumerate(getattr(status, "nozzles", None) or []):
         raw = getattr(nozzle, "nozzle_diameter", "") or ""
         try:
             value = float(raw)
         except (TypeError, ValueError):
             continue
-        if value > 0:
+        if value > 0 and _nozzle_is_mounted(info.get(index)):
             diameters.append(value)
     return diameters
 
 
-def _nozzle_mismatch_message(sliced_nozzle: float | None, installed: list[float]) -> str | None:
+def _rack_nozzle_diameters(status) -> list[float]:
+    """Diameters sitting in the tool-changer rack, nearest dock first (#2885).
+
+    Keyed off the nozzle ids themselves rather than the printer model: only a
+    rack machine ever reports ids 16-21, so there is no model registry to keep
+    in sync. An empty dock is simply absent from the payload — measured on an
+    H2C whose R2 (id 17) was empty and unlisted while R1/R3/R4/R5/R6 were all
+    present — so appearing here already means "a nozzle is in that dock".
+
+    ``stat`` is deliberately not interpreted: its values aren't known, and
+    reading it wrongly could hide a nozzle the printer would happily fetch.
+    """
+    diameters: list[float] = []
+    for nozzle_id, entry in sorted(_nozzle_info_by_id(status).items()):
+        if nozzle_id not in _RACK_NOZZLE_IDS:
+            continue
+        # PrinterState spells it "diameter"; the REST schema renames it to
+        # "nozzle_diameter". Accept either so a caller holding the serialised
+        # shape gets the same answer.
+        value = _parse_diameter(entry.get("diameter") or entry.get("nozzle_diameter"))
+        if value is not None:
+            diameters.append(value)
+    return diameters
+
+
+def _format_diameters(diameters: list[float]) -> str:
+    """``[0.4, 0.4, 0.6]`` → ``"0.4mm / 0.6mm"``, in first-seen order.
+
+    Deduplicated because a loaded rack holds several nozzles of the same size,
+    and "0.4mm / 0.4mm / 0.4mm / 0.6mm / 0.2mm" tells the reader nothing the
+    short form doesn't. Matching still runs over the full list.
+    """
+    return " / ".join(f"{d:g}mm" for d in dict.fromkeys(diameters))
+
+
+def _nozzle_mismatch_message(
+    sliced_nozzle: float | None,
+    installed: list[float],
+    rack: list[float] | None = None,
+) -> str | None:
     """Return an actionable error message when the sliced nozzle can't be
-    printed on any installed nozzle, else None (#1899).
+    printed on any nozzle the machine can reach, else None (#1899).
 
     Fail-safe: returns None whenever we lack the data to judge — no sliced
     diameter, or the printer reported no nozzles — so a print is only ever
@@ -541,16 +708,27 @@ def _nozzle_mismatch_message(sliced_nozzle: float | None, installed: list[float]
     EITHER installed nozzle passes (a 0.6 slice is fine if one hotend is 0.6).
     The 0.05 tolerance absorbs float noise while staying well inside the 0.2
     gap between adjacent nozzle sizes (0.2/0.4/0.6/0.8).
+
+    *rack* holds the diameters parked in a tool-changer dock (H2C). Those count
+    as reachable: the printer fetches one as part of starting the print, so a
+    slice that matches a docked nozzle is not a mismatch. Without this the
+    guard blocked every job whose nozzle happened not to be on a hotend at
+    dispatch time — on a rack loaded with 0.2/0.4/0.6 that meant only the
+    diameter already mounted could ever print, and the user had to fetch the
+    nozzle by hand on the printer's own UI first (#2885).
     """
-    if not sliced_nozzle or not installed:
+    reachable = [*installed, *(rack or [])]
+    if not sliced_nozzle or not reachable:
         return None
-    if any(abs(d - sliced_nozzle) < 0.05 for d in installed):
+    if any(abs(d - sliced_nozzle) < 0.05 for d in reachable):
         return None
-    installed_str = " / ".join(f"{d:g}mm" for d in installed)
+    where = f"{_format_diameters(installed)} installed" if installed else "no nozzle mounted"
+    if rack:
+        where += f" and {_format_diameters(rack)} in the nozzle rack"
     return (
         f"File sliced for a {sliced_nozzle:g}mm nozzle, but the printer has "
-        f"{installed_str} installed. Re-slice for the installed nozzle, or "
-        f"install the matching nozzle before printing."
+        f"{where}. Re-slice for an available nozzle, or fit the matching "
+        f"nozzle before printing."
     )
 
 
@@ -4355,6 +4533,22 @@ class PrintScheduler:
         "default": 0,
     }
 
+    @classmethod
+    def _bundled_preheat_targets(cls) -> dict[str, int]:
+        """The bundled map under the same key casing a parsed one gets.
+
+        The constant is declared with a lowercase ``default`` because that is
+        the key the Settings editor writes and displays. Every read of the map
+        happens after ``str(key).upper()``, so handing the constant back as
+        declared broke the contract the parser documents: an install that had
+        never touched the setting returned a dict with no ``DEFAULT`` in it,
+        and the resolution loop's fallback silently found nothing. It read the
+        right number only because the bundled default happens to be 0 -- change
+        that constant and every unconfigured install would keep preheating to
+        zero with no way to tell why.
+        """
+        return {key.upper(): value for key, value in cls.DEFAULT_PREHEAT_FILAMENT_TARGETS.items()}
+
     async def _get_preheat_filament_targets(self, db: AsyncSession) -> dict[str, int]:
         """Parse the user-configured filament→chamber-target map, falling back
         to DEFAULT_PREHEAT_FILAMENT_TARGETS on missing / malformed JSON. Keys
@@ -4362,14 +4556,14 @@ class PrintScheduler:
         returned dict so the resolution loop can index it unconditionally."""
         raw = await self._get_setting(db, "preheat_filament_targets")
         if not raw:
-            return dict(self.DEFAULT_PREHEAT_FILAMENT_TARGETS)
+            return self._bundled_preheat_targets()
         try:
             parsed = json.loads(raw)
             if not isinstance(parsed, dict):
                 raise ValueError("not an object")
         except (json.JSONDecodeError, ValueError) as exc:
             logger.warning("preheat_filament_targets unparseable, using defaults: %s", exc)
-            return dict(self.DEFAULT_PREHEAT_FILAMENT_TARGETS)
+            return self._bundled_preheat_targets()
         # Coerce values to int; drop unparseable rows so a stray string
         # doesn't crash the loop.
         out: dict[str, int] = {}
@@ -4390,37 +4584,90 @@ class PrintScheduler:
         "PA-CF" (no space to split on)."""
         return tray_type.split()[0].upper() if tray_type else ""
 
+    def _target_for_tray_type(self, tray_type: str | None, targets: dict[str, int]) -> int:
+        """Per-filament chamber target for one tray's reported type, or 0 when
+        the tray is empty / RFID-less and reports no type at all.
+
+        A filled or foamed variant wants its base material's chamber when the
+        map has no row of its own: ASA-GF is ASA and needs ASA's 45 degrees,
+        not the 0 an unknown type falls to. The specific type is still tried
+        first, so PETG-CF and PA-CF keep the hotter rows they are listed with
+        (#2902).
+        """
+        normalised = self._normalize_filament_type(tray_type or "")
+        if not normalised:
+            return 0
+        target = targets.get(normalised)
+        if target is None:
+            target = targets.get(normalised.split("-")[0], targets.get("DEFAULT", 0))
+        return target
+
     def _derive_chamber_target(
         self,
         printer: Printer,
         targets: dict[str, int],
+        item: PrintQueueItem | None = None,
     ) -> int:
-        """Look up the chamber target for each loaded AMS tray and return the
-        max. Returns 0 when no AMS data is available (e.g. external-spool
-        prints) or when every loaded slot maps to 0 — the chamber phase then
-        short-circuits in the main loop.
+        """Chamber target for the trays this print actually loads: the max of
+        their per-filament targets. Returns 0 when there is nothing to read (no
+        status, no AMS telemetry — e.g. external-spool prints) or when every
+        tray considered maps to 0, and the chamber phase then short-circuits in
+        the main loop.
+
+        ``item`` narrows the scan to the trays named in its ``ams_mapping``.
+        Scanning the whole unit instead meant one ASA spool parked in the AMS
+        forced a 45°C chamber onto every PLA job sharing it — the full max-wait
+        plus soak burned ahead of each upload, on a printer whose chamber never
+        reaches the target anyway (#2886). An item with no usable mapping falls
+        back to scanning every loaded tray: that is the only signal left, and
+        narrowing to nothing would skip preheat on prints that genuinely need
+        it.
 
         Reads from `printer_manager.get_status(...).raw_data['ams']`, which is
         the same source the dispatcher uses for AMS slot mapping. Empty / RFID-
-        less slots have empty `tray_type` and contribute nothing."""
+        less slots have empty `tray_type` and contribute nothing. The external
+        spool is consulted only when the mapping names it (>= 254); it stays
+        out of the unnarrowed scan, so an item without a mapping derives from
+        the AMS alone exactly as before.
+        """
         state = printer_manager.get_status(printer.id)
         if state is None:
             return 0
-        ams_list = (state.raw_data or {}).get("ams") if state.raw_data else None
+        raw_data = state.raw_data or {}
+        used = _used_global_tray_ids(item)
+        ams_list = raw_data.get("ams")
         # Older Bambu firmware nests AMS as {"ams": {"ams": [...]}} — try both.
         if isinstance(ams_list, dict):
             ams_list = ams_list.get("ams") or []
         if not isinstance(ams_list, list):
-            return 0
+            ams_list = []
         best = 0
         for ams in ams_list:
-            for tray in (ams.get("tray") or []) if isinstance(ams, dict) else []:
-                normalised = self._normalize_filament_type(tray.get("tray_type") or "")
-                if not normalised:
+            if not isinstance(ams, dict):
+                continue
+            ams_id = _int_or(ams.get("id"), 0)
+            for tray in ams.get("tray") or []:
+                # A non-dict entry has never been seen from real firmware, but
+                # `.get` on one raises, and nothing between here and
+                # `_dispatch_one`'s try/finally catches it — the item would be
+                # left holding its dispatch claim. Preheat is best-effort by
+                # contract, so step over it instead.
+                if not isinstance(tray, dict):
                     continue
-                target = targets.get(normalised, targets.get("DEFAULT", 0))
-                if target > best:
-                    best = target
+                if used is not None and _global_tray_id(ams_id, _int_or(tray.get("id"), 0)) not in used:
+                    continue
+                best = max(best, self._target_for_tray_type(tray.get("tray_type"), targets))
+        if used is not None and any(t >= _EXTERNAL_TRAY_ID_MIN for t in used):
+            for vt in raw_data.get("vt_tray") or []:
+                if not isinstance(vt, dict):
+                    continue
+                # `_build_loaded_filaments` addresses external feeds by the id
+                # the firmware reports — 255 main, 254 deputy — defaulting to
+                # 254 when the field is absent. Same expression here so the two
+                # agree on which entry a mapping's 254/255 refers to.
+                if _int_or(vt.get("id"), _EXTERNAL_TRAY_ID_MIN) not in used:
+                    continue
+                best = max(best, self._target_for_tray_type(vt.get("tray_type"), targets))
         return best
 
     def _release_keep_warm(self, pid: int) -> None:
@@ -4523,7 +4770,11 @@ class PrintScheduler:
         no bed temperature (e.g. OrcaSlicer gcode.3mf exports) therefore still
         get a hold — chamber need is what gates the feature, not metadata.
         Skips entirely for filaments that map to a 0°C chamber target
-        (PLA, PETG, etc.). Printers being dispatched this cycle are excluded:
+        (PLA, PETG, etc.) — read off the trays the next item's ``ams_mapping``
+        names, so a hot-chamber spool it never touches does not hold the bed of
+        a PLA job (#2886). An item still awaiting its mapping is judged on the
+        whole unit, as every item was before. Printers being dispatched this
+        cycle are excluded:
         ``_preheat_and_soak`` already handles their bed temperature.
 
         Bounded by ``queue_keep_warm_max_minutes`` — on timeout the bed is
@@ -4605,7 +4856,8 @@ class PrintScheduler:
                     filament_targets = await self._get_preheat_filament_targets(db)
                 printer_obj = await self._get_printer(db, pid)
                 chamber_needed = (
-                    printer_obj is not None and self._derive_chamber_target(printer_obj, filament_targets) > 0
+                    printer_obj is not None
+                    and self._derive_chamber_target(printer_obj, filament_targets, next_item) > 0
                 )
             if not chamber_needed:
                 continue
@@ -4851,8 +5103,9 @@ class PrintScheduler:
              even if the global is off.
           2. Chamber target — `item.preheat_chamber_target_override` if non-null;
              else max of `preheat_filament_targets[normalize(t.tray_type)]`
-             across loaded AMS slots; else 0 (skips chamber phase, keeps bed
-             phase + soak timer).
+             across the trays `item.ams_mapping` names (every loaded slot when
+             it names none); else 0 (skips chamber phase, keeps bed phase +
+             soak timer).
           3. Three hardware tiers branch the wait loop:
              - Chamber heater (H2C/H2D/H2DPro/H2S/X2D/X1E via supports_chamber_heater):
                send M141 to the resolved target, then wait for the chamber sensor
@@ -4888,9 +5141,10 @@ class PrintScheduler:
 
         # Chamber target resolution:
         #   1. Explicit per-item override beats everything (user knows best).
-        #   2. Otherwise derive from loaded AMS filament types via the per-
-        #      filament target map. PLA-only print derives 0 → chamber phase
-        #      auto-skips without the user touching anything.
+        #   2. Otherwise derive from the filament types this print loads, via
+        #      the per-filament target map. PLA-only print derives 0 → chamber
+        #      phase auto-skips without the user touching anything, even when
+        #      an ASA spool is sitting in another slot of the same AMS (#2886).
         explicit_target = getattr(item, "preheat_chamber_target_override", None)
         if explicit_target is not None and explicit_target > 0:
             chamber_target = int(explicit_target)
@@ -4900,7 +5154,7 @@ class PrintScheduler:
             chamber_source = "item-override-zero"
         else:
             targets = await self._get_preheat_filament_targets(db)
-            chamber_target = self._derive_chamber_target(printer, targets)
+            chamber_target = self._derive_chamber_target(printer, targets, item)
             chamber_source = "filament-map"
 
         bed_target = int(archive.bed_temperature) if archive and archive.bed_temperature else 0
@@ -5859,10 +6113,18 @@ class PrintScheduler:
         # print proceed exactly as before. On dual-nozzle printers (H2D) a match
         # against EITHER installed nozzle passes, so a 0.6 slice is fine as long
         # as one of the two hotends is a 0.6.
+        #
+        # On a tool-changer model (H2C) the nozzles parked in the rack count too
+        # (#2885): the printer fetches one as part of starting the print, so the
+        # set to test against is "reachable", not "currently mounted". This runs
+        # well before the rack picker at the bottom of this method, so without
+        # the rack in scope here that picker never got the chance to run.
         sliced_nozzle = archive.nozzle_diameter if archive else None
         if sliced_nozzle:
-            installed = _installed_nozzle_diameters(printer_manager.get_status(item.printer_id))
-            mismatch_msg = _nozzle_mismatch_message(sliced_nozzle, installed)
+            nozzle_status = printer_manager.get_status(item.printer_id)
+            installed = _installed_nozzle_diameters(nozzle_status)
+            rack = _rack_nozzle_diameters(nozzle_status)
+            mismatch_msg = _nozzle_mismatch_message(sliced_nozzle, installed, rack)
             if mismatch_msg:
                 item.status = "failed"
                 item.error_message = mismatch_msg
@@ -5975,6 +6237,13 @@ class PrintScheduler:
                 remote_path,
                 socket_timeout=ftp_timeout,
                 printer_model=printer.model,
+                # This delete and the upload below are one bounded, user-initiated
+                # unit -- at most nine connections -- so neither skips on the
+                # handshake cool-off the opportunistic sweeps rely on. In #2898's
+                # trace this delete took the TLS failure and armed the cool-off,
+                # and the upload's four attempts were then spent against it
+                # without a socket being opened.
+                respect_handshake_cooloff=False,
             )
             logger.debug("Queue item %s: Delete result: %s", item.id, delete_result)
         except Exception as e:
@@ -6006,6 +6275,11 @@ class PrintScheduler:
         # wrong advice for a link that was simply too slow to finish (#2529).
         upload_error: str | None = None
 
+        # Why the upload failed, straight from the client rather than inferred.
+        # Owned here, so a background fetch for another print cannot overwrite
+        # it between the failure and the sentence built from it (#2899).
+        upload_failure = FtpFailureReport()
+
         try:
             if ftp_retry_enabled:
                 uploaded = await with_ftp_retry(
@@ -6017,6 +6291,8 @@ class PrintScheduler:
                     socket_timeout=ftp_timeout,
                     printer_model=printer.model,
                     progress_callback=progress_bridge,
+                    respect_handshake_cooloff=False,
+                    failure=upload_failure,
                     max_retries=ftp_retry_count,
                     retry_delay=ftp_retry_delay,
                     operation_name=f"Upload print to {printer.name}",
@@ -6030,6 +6306,8 @@ class PrintScheduler:
                     socket_timeout=ftp_timeout,
                     printer_model=printer.model,
                     progress_callback=progress_bridge,
+                    respect_handshake_cooloff=False,
+                    failure=upload_failure,
                 )
         except UploadCancelled as e:
             uploaded = False
@@ -6047,10 +6325,12 @@ class PrintScheduler:
             injected_path.unlink(missing_ok=True)
 
         if not uploaded:
-            error_msg = upload_error or (
-                "Failed to upload file to printer. Check if SD card is inserted and properly formatted (FAT32/exFAT). "
-                "See server logs for detailed diagnostics."
-            )
+            # This used to be one string for every upload failure, telling
+            # everyone to check the SD card. The client knows which of seven
+            # things went wrong and logs each one differently; it just had no
+            # way to say so here, so the card got named even for a TLS
+            # handshake that never reached the printer's filesystem (#2899).
+            error_msg = upload_error or describe_upload_failure(upload_failure.failure)
             item.status = "failed"
             item.error_message = error_msg
             item.completed_at = datetime.now(timezone.utc)
@@ -6065,7 +6345,9 @@ class PrintScheduler:
                 job_name=filename.replace(".gcode.3mf", "").replace(".3mf", ""),
                 printer_id=printer.id,
                 printer_name=printer.name,
-                reason="Failed to upload file to printer",
+                # The same sentence the queue shows. A push notification saying
+                # something different from the UI is its own small bug (#2899).
+                reason=error_msg,
                 db=db,
             )
             try:

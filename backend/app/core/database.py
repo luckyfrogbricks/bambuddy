@@ -303,6 +303,7 @@ async def init_db():
         library,
         local_preset,
         location,
+        location_ha_sensor,
         long_lived_token,
         maintenance,
         notification,
@@ -329,6 +330,7 @@ async def init_db():
         spool,
         spool_assignment,
         spool_catalog,
+        spool_filament_preset,
         spool_k_profile,
         spool_usage_history,
         spoolbuddy_device,
@@ -594,16 +596,64 @@ async def _migrate_encrypt_legacy_secrets() -> None:
         )
 
 
+# PostgreSQL SQLSTATE codes meaning "this DDL statement has already been applied".
+# We classify on these rather than on the error text because the server renders
+# messages in its own ``lc_messages`` locale: a Russian-locale server answers a
+# duplicate ADD COLUMN with "уже существует", which no English substring check can
+# recognise. That made Bambuddy unstartable on every non-English PostgreSQL server,
+# fresh or existing — create_all() runs before run_migrations(), so on a new database
+# essentially every ADD COLUMN below is expected to come back as a duplicate (#2949).
+_PG_ALREADY_APPLIED = frozenset(
+    {
+        "42701",  # duplicate_column — ALTER TABLE ADD COLUMN
+        "42P07",  # duplicate_table — CREATE TABLE, CREATE INDEX
+        "42710",  # duplicate_object — ADD CONSTRAINT, CREATE TRIGGER
+        "23505",  # unique_violation — duplicate key
+    }
+)
+
+# undefined_column. Idempotency only for RENAME COLUMN (the rename already ran);
+# on any other statement a missing column means a broken schema, not a re-run.
+_PG_UNDEFINED_COLUMN = "42703"
+
+
+def _sqlstate(exc) -> str | None:
+    """Return the PostgreSQL SQLSTATE behind a SQLAlchemy error, or None.
+
+    None on SQLite, whose DBAPI exceptions carry no such code — and which never
+    localises its messages, so the text match below stays correct there.
+    """
+    orig = getattr(exc, "orig", None)
+    for attr in ("sqlstate", "pgcode"):
+        code = getattr(orig, attr, None)
+        if code:
+            return str(code)
+    return None
+
+
+def _is_already_applied(exc, sql: str) -> bool:
+    """Return True if a failed DDL statement had simply already been applied."""
+    is_rename = "rename column" in sql.lower()
+
+    state = _sqlstate(exc)
+    if state is not None:
+        return state in _PG_ALREADY_APPLIED or (state == _PG_UNDEFINED_COLUMN and is_rename)
+
+    msg = str(exc).lower()
+    if any(k in msg for k in ("already exists", "duplicate key", "duplicate column name", "no such column")):
+        return True
+    return is_rename and "column" in msg and "does not exist" in msg
+
+
 async def _safe_execute(conn, sql):
     """Execute a DDL migration statement, silently ignoring idempotency errors.
 
-    'already exists', 'duplicate column name' (SQLite ADD COLUMN), 'no such column'
-    (SQLite RENAME COLUMN), 'duplicate key', and the compound
-    'column … does not exist' (PostgreSQL RENAME COLUMN idempotency) are swallowed
-    so that re-running DDL migrations is safe.  The compound check additionally
-    requires the SQL to be a RENAME COLUMN statement so that "does not exist" errors
-    from ADD COLUMN or CREATE INDEX (which would indicate schema corruption, not
-    idempotency) are never silently swallowed.
+    Statements that had already been applied are swallowed so that re-running DDL
+    migrations is safe — see :func:`_is_already_applied` for how that is decided
+    (SQLSTATE on PostgreSQL, message text on SQLite). Idempotency for a missing
+    column is narrowed to RENAME COLUMN, so a missing column on ADD COLUMN or
+    CREATE INDEX — which would indicate schema corruption, not a re-run — is never
+    silently swallowed.
     Any other error is logged and re-raised — callers must not assume silent
     recovery, as a failure will abort the migration sequence and prevent
     application startup.
@@ -621,14 +671,7 @@ async def _safe_execute(conn, sql):
         async with conn.begin_nested():
             await conn.execute(text(sql))
     except (OperationalError, ProgrammingError) as exc:
-        msg = str(exc).lower()
-        # Only swallow "column … does not exist" for RENAME COLUMN — not for ADD COLUMN
-        # or CREATE INDEX where it would indicate schema corruption, not idempotency.
-        column_not_exists = "rename column" in sql.lower() and "column" in msg and "does not exist" in msg
-        if (
-            not any(k in msg for k in ("already exists", "duplicate key", "duplicate column name", "no such column"))
-            and not column_not_exists
-        ):
+        if not _is_already_applied(exc, sql):
             logger.error("Migration statement failed: %s | SQL: %.200s", exc, sql)
             raise
 
@@ -838,6 +881,168 @@ async def _migrate_scope_run_filament_to_plate(conn) -> None:
         # Mark done unconditionally (even when nothing matched) so this one-shot
         # never re-scans the print log on subsequent boots. id/timestamps come
         # from the table's own defaults; "key" is quoted as it's a keyword.
+        await conn.execute(
+            text('INSERT INTO settings ("key", value) VALUES (:k, :v)'),
+            {"k": flag, "v": "true"},
+        )
+
+
+async def _reclassify_sliced_3mf_library_files(conn) -> None:
+    """Re-type library rows holding a sliced 3MF that does not say so (#2993).
+
+    ``file_type`` was decided from the filename alone, so a sliced 3MF whose
+    name lacks the ``.gcode`` infix landed as a source-only project. That is
+    not a rare shape: a plate exported from Studio, or a print dispatched
+    through the cloud, reaches the archive as ``Foo.3mf`` with its G-code
+    intact, and downloading one and re-importing it produced a library file
+    Bambuddy refused to offer a Print button for. The forward fix classifies on
+    content; this pass reaches the rows already stored.
+
+    One-shot, for the same reason the #2614 backfill is: a genuine source 3MF
+    keeps matching ``file_type = '3mf'`` forever, so without the gate every
+    boot would re-open every model file in the library.
+
+    External rows are deliberately skipped. They point at a mount that may be
+    slow, unmounted, or enormous, and startup is the worst possible place to
+    find that out -- the folder's own scan re-types them with no such risk.
+    """
+    from pathlib import Path
+
+    from sqlalchemy import text
+
+    from backend.app.utils.threemf_tools import carries_gcode
+
+    flag = "_backfill_2993_sliced_3mf_type_done"
+
+    async with conn.begin_nested():
+        already = (
+            await conn.execute(text('SELECT value FROM settings WHERE "key" = :k'), {"k": flag})
+        ).scalar_one_or_none()
+        if already:
+            return
+
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT id, file_path FROM library_files "
+                    "WHERE file_type = '3mf' AND deleted_at IS NULL "
+                    "AND file_path IS NOT NULL AND file_path <> '' "
+                    "AND (is_external IS NULL OR is_external = :false_val)"
+                ),
+                {"false_val": False},
+            )
+        ).fetchall()
+
+        reclassified = 0
+        for row in rows:
+            path = Path(row.file_path)
+            if not path.is_absolute():
+                path = settings.base_dir / row.file_path
+            # carries_gcode swallows a missing or unreadable file, so a library
+            # with holes in it still finishes the pass.
+            if not carries_gcode(path):
+                continue
+            await conn.execute(
+                text("UPDATE library_files SET file_type = 'gcode.3mf' WHERE id = :id"),
+                {"id": row.id},
+            )
+            reclassified += 1
+
+        if reclassified:
+            logger.info(
+                "[#2993] Re-typed %d library file(s) from source 3MF to sliced -- they carry G-code",
+                reclassified,
+            )
+
+        # Marked done even when nothing matched, so the scan never repeats.
+        await conn.execute(
+            text('INSERT INTO settings ("key", value) VALUES (:k, :v)'),
+            {"k": flag, "v": "true"},
+        )
+
+
+async def _backfill_archive_bed_temperature(conn) -> None:
+    """Fill in ``print_archives.bed_temperature`` for archives written before #2989.
+
+    Bed temperature was read by looking for a ``bed_temperature`` key, which
+    BambuStudio does not write -- it stores a per-filament array per plate type
+    and names the fitted plate in ``curr_bed_type``. Every archive from a Bambu
+    slice therefore stored NULL: 0 of 455 real 3MFs resolved on the install this
+    was measured on. The forward fix reads the right array; without this, every
+    archive made before it stays blank, and preheat keeps falling back to the
+    keep-warm bed temperature when those jobs are reprinted from the queue.
+
+    Only rows that are still NULL are touched, and only from the 3MF already on
+    disk -- nothing is invented and nothing already recorded is overwritten. An
+    archive whose file is gone (a no-3MF fallback, or one whose 3MF has been
+    cleaned up) is skipped and stays NULL, which is the honest answer.
+
+    Gated to run exactly once via a settings flag, like #2614's repair. The
+    work itself is repeatable -- it only fills NULLs -- but the rows it cannot
+    fill are exactly the ones it would re-open on every boot, and that set grows
+    with print history.
+    """
+    from pathlib import Path
+
+    from sqlalchemy import text
+
+    from backend.app.utils.threemf_tools import extract_bed_temperature_from_3mf
+
+    flag = "_backfill_2989_bed_temperature_done"
+
+    async with conn.begin_nested():
+        already = (
+            await conn.execute(text('SELECT value FROM settings WHERE "key" = :k'), {"k": flag})
+        ).scalar_one_or_none()
+        if already is not None:
+            # Presence, not truthiness. A flag row that somehow holds an empty
+            # string would otherwise re-run and then fail the unique key on the
+            # INSERT below -- which, at startup, is a boot loop.
+            return
+
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT id, file_path FROM print_archives "
+                    "WHERE bed_temperature IS NULL "
+                    "AND file_path IS NOT NULL AND file_path != ''"
+                )
+            )
+        ).fetchall()
+
+        filled = 0
+        for row in rows:
+            # Per row, and broad, for the reason in the extractor's docstring:
+            # nothing above this has a handler, so one unreadable archive must
+            # not cost the user their boot. #2614's repair guards its rows the
+            # same way.
+            try:
+                path = Path(row.file_path)
+                if not path.is_absolute():
+                    path = settings.base_dir / row.file_path
+                if not path.exists():
+                    continue
+                temperature = extract_bed_temperature_from_3mf(path)
+            except Exception as exc:
+                logger.warning("[#2989] could not read %s for archive %s: %s", row.file_path, row.id, exc)
+                continue
+            if not temperature:
+                continue
+            await conn.execute(
+                text("UPDATE print_archives SET bed_temperature = :t WHERE id = :id"),
+                {"t": temperature, "id": row.id},
+            )
+            filled += 1
+
+        if filled:
+            logger.info(
+                "[#2989] Read the bed temperature from the 3MF for %d archive(s) that had none",
+                filled,
+            )
+
+        # Marked done even when nothing matched, so the rows it could not fill --
+        # which are exactly the ones it would re-open every boot -- are not
+        # rescanned forever. Same shape as #2614's one-shot.
         await conn.execute(
             text('INSERT INTO settings ("key", value) VALUES (:k, :v)'),
             {"k": flag, "v": "true"},
@@ -1274,6 +1479,255 @@ async def _migrate_add_print_archive_cost_center(conn) -> None:
     )
 
 
+# Historical failure-reason labels, mapped to the canonical key that replaced
+# them (issue #2974).
+#
+# Three writers used to put three different spellings of one cause into
+# ``failure_reason``: the backend wrote English display labels, older versions
+# of the archive editor wrote the *translated* label in whatever locale that
+# user was running, and two stale-archive paths wrote English prose sentences.
+# The Failure Analysis widget groups on the raw column, so one real cause could
+# occupy several buckets -- measured on a live install before this landed: 91
+# rows reading "User cancelled" beside 1 reading "userCancelled", which in an
+# English UI rendered as the same words twice with different counts.
+#
+# This is deliberately a FROZEN SNAPSHOT rather than something derived from the
+# locale files at run time. It maps values as they were written historically; if
+# a translation is reworded tomorrow, the old string is still what sits in the
+# database and still has to map. Regenerating it from ``en.ts`` and friends
+# would silently stop recognising the very rows it exists to convert.
+#
+# Every label here resolves to exactly one key -- verified across all 14 locales
+# with no collisions -- so the conversion is exact rather than a best guess. A
+# value that is NOT in this map (free text from an older build, a translation
+# since edited) is deliberately left alone: it already renders through the
+# ``defaultValue`` fallback in both the editor and the Statistics breakdown, and
+# guessing at it would be worse than leaving one honest string in its own bucket.
+_LEGACY_FAILURE_REASON_LABELS: dict[str, str] = {
+    "Adhesion failure": "adhesionFailure",
+    "Agotamiento del filamento": "filamentRunout",
+    "Alabeo": "warping",
+    "Altro": "other",
+    "Annullato dall'utente": "userCancelled",
+    "Annulé par l'utilisateur": "userCancelled",
+    "Aucune mise à jour d'état reçue": "noStatusUpdate",
+    "Autre": "other",
+    "Az ekstrüzyon": "underExtrusion",
+    "Bico entupido": "cloggedNozzle",
+    "Boquilla obstruida": "cloggedNozzle",
+    "Buse bouchée": "cloggedNozzle",
+    "Bükülme": "warping",
+    "Cancelada por el usuario": "userCancelled",
+    "Cancelado pelo usuário": "userCancelled",
+    "Clogged nozzle": "cloggedNozzle",
+    "Corte de corriente": "powerFailure",
+    "Coupure courant": "powerFailure",
+    "Deformazione": "warping",
+    "Deslocamento de camada": "layerShift",
+    "Desplazamiento de capa": "layerShift",
+    "Diğer": "other",
+    "Door gebruiker geannuleerd": "userCancelled",
+    "Draadvorming": "stringing",
+    "Durum güncellemesi alınmadı": "noStatusUpdate",
+    "Décalage de couche": "layerShift",
+    "Défaut d'adhésion": "adhesionFailure",
+    "Empenamento": "warping",
+    "Espagueti / Desprendido": "spaghettiDetached",
+    "Fadenziehen": "stringing",
+    "Falha de adesão": "adhesionFailure",
+    "Falha de energia": "powerFailure",
+    "Fallimento adesione": "adhesionFailure",
+    "Fallo de adhesión": "adhesionFailure",
+    "Filament aufgebraucht": "filamentRunout",
+    "Filament bitti": "filamentRunout",
+    "Filament fini": "filamentRunout",
+    "Filament op": "filamentRunout",
+    "Filament runout": "filamentRunout",
+    "Filamento": "stringing",
+    "Filamento esaurito": "filamentRunout",
+    "Fim do filamento": "filamentRunout",
+    "Fios": "stringing",
+    "Geen statusupdate ontvangen": "noStatusUpdate",
+    "Güç kesintisi": "powerFailure",
+    "Haftungsfehler": "adhesionFailure",
+    "Hechtingsprobleem": "adhesionFailure",
+    "Hilos": "stringing",
+    "Katman kayması": "layerShift",
+    "Kein Statusupdate empfangen": "noStatusUpdate",
+    "Kromtrekken": "warping",
+    "Kullanıcı iptal etti": "userCancelled",
+    "Laagverschuiving": "layerShift",
+    "Layer shift": "layerShift",
+    "Mancanza corrente": "powerFailure",
+    "Nenhuma atualização de status recebida": "noStatusUpdate",
+    "Nessun aggiornamento di stato ricevuto": "noStatusUpdate",
+    "No se recibió actualización de estado": "noStatusUpdate",
+    "No status update received": "noStatusUpdate",
+    "Onderextrusie": "underExtrusion",
+    "Other": "other",
+    "Otro": "other",
+    "Outro": "other",
+    "Overig": "other",
+    "Power failure": "powerFailure",
+    "Schichtversatz": "layerShift",
+    "Sonstiges": "other",
+    "Sotto-estrusione": "underExtrusion",
+    "Sous-extrusion": "underExtrusion",
+    "Spagetti / Ayrılmış": "spaghettiDetached",
+    "Spaghetti / Abgelöst": "spaghettiDetached",
+    "Spaghetti / Destacado": "spaghettiDetached",
+    "Spaghetti / Detached": "spaghettiDetached",
+    "Spaghetti / Détaché": "spaghettiDetached",
+    "Spaghetti / losgeraakt": "spaghettiDetached",
+    "Spaghetti / staccato": "spaghettiDetached",
+    "Spostamento layer": "layerShift",
+    "Stale - print likely cancelled or failed without status update": "noStatusUpdate",
+    "Stale - reconciled after reconnect, end time unknown": "noStatusUpdate",
+    "Stringing": "stringing",
+    "Stringing (Cheveux d'ange)": "stringing",
+    "Stromausfall": "powerFailure",
+    "Stroomuitval": "powerFailure",
+    "Subextrusión": "underExtrusion",
+    "Subextrusão": "underExtrusion",
+    "Tıkalı nozul": "cloggedNozzle",
+    "Ugello intasato": "cloggedNozzle",
+    "Under-extrusion": "underExtrusion",
+    "Unterextrusion": "underExtrusion",
+    "User cancelled": "userCancelled",
+    "Verformung": "warping",
+    "Verstopfte Düse": "cloggedNozzle",
+    "Verstopte nozzle": "cloggedNozzle",
+    "Vom Benutzer abgebrochen": "userCancelled",
+    "Warping": "warping",
+    "Warping (Déformation)": "warping",
+    "Yapışma başarısız": "adhesionFailure",
+    "İplik oluşumu": "stringing",
+    "Биття філаменту": "filamentRunout",
+    "Викривлення": "warping",
+    "Другое": "other",
+    "Закончился филамент": "filamentRunout",
+    "Засмічене сопло": "cloggedNozzle",
+    "Засор сопла": "cloggedNozzle",
+    "Збій живлення": "powerFailure",
+    "Зсув шару": "layerShift",
+    "Користувач скасовано": "userCancelled",
+    "Коробление": "warping",
+    "Нанизування": "stringing",
+    "Недоэкструзия": "underExtrusion",
+    "Обновление статуса не получено": "noStatusUpdate",
+    "Оновлення статусу не отримано": "noStatusUpdate",
+    "Отменено пользователем": "userCancelled",
+    "Плохая адгезия к столу": "adhesionFailure",
+    "Порушення адгезії": "adhesionFailure",
+    "Підвидавлювання": "underExtrusion",
+    "Сбой питания": "powerFailure",
+    "Сдвиг слоёв": "layerShift",
+    "Спагетти / отрыв детали": "spaghettiDetached",
+    "Спагетті / Відр": "spaghettiDetached",
+    "Стрингинг": "stringing",
+    "інше": "other",
+    "その他": "other",
+    "ステータス更新を受信できませんでした": "noStatusUpdate",
+    "スパゲッティ / 剥離": "spaghettiDetached",
+    "ノズル詰まり": "cloggedNozzle",
+    "フィラメント切れ": "filamentRunout",
+    "ユーザーによるキャンセル": "userCancelled",
+    "レイヤーシフト": "layerShift",
+    "使用者取消": "userCancelled",
+    "其他": "other",
+    "反り": "warping",
+    "喷嘴堵塞": "cloggedNozzle",
+    "噴嘴堵塞": "cloggedNozzle",
+    "定着不良": "adhesionFailure",
+    "层偏移": "layerShift",
+    "層偏移": "layerShift",
+    "押出不足": "underExtrusion",
+    "拉丝": "stringing",
+    "拉丝 / 脱落": "spaghettiDetached",
+    "拉絲": "stringing",
+    "拉絲 / 脫落": "spaghettiDetached",
+    "挤出不足": "underExtrusion",
+    "擠出不足": "underExtrusion",
+    "断电": "powerFailure",
+    "斷電": "powerFailure",
+    "未收到状态更新": "noStatusUpdate",
+    "未收到狀態更新": "noStatusUpdate",
+    "用户取消": "userCancelled",
+    "糸引き": "stringing",
+    "翘曲": "warping",
+    "翹曲": "warping",
+    "耗材用完": "filamentRunout",
+    "附着力失败": "adhesionFailure",
+    "附著力失敗": "adhesionFailure",
+    "電源障害": "powerFailure",
+    "기타": "other",
+    "노즐 막힘": "cloggedNozzle",
+    "레이어 시프트": "layerShift",
+    "사용자 취소": "userCancelled",
+    "상태 업데이트를 받지 못함": "noStatusUpdate",
+    "스트링": "stringing",
+    "스파게티 / 분리": "spaghettiDetached",
+    "압출 부족": "underExtrusion",
+    "전원 실패": "powerFailure",
+    "접착 실패": "adhesionFailure",
+    "필라멘트 소진": "filamentRunout",
+    "휨": "warping",
+}
+
+
+async def _migrate_failure_reason_vocabulary(conn):
+    """Fold historical failure-reason labels onto the canonical keys (#2974).
+
+    ``print_archives.failure_reason`` and ``print_log_entries.failure_reason``
+    accumulated three spellings of the same cause -- see
+    ``_LEGACY_FAILURE_REASON_LABELS`` for who wrote what. The PATCH route in
+    ``api/routes/print_log.py`` has enforced the key vocabulary for a while and
+    ``derive_failure_reason`` now produces it too, so this is the one-time pass
+    that brings existing rows in line.
+
+    Deliberately NOT gated behind a settings flag, unlike the #2614 backfill.
+    The statement is self-terminating -- it only matches values in the map, and
+    a key is never a label, so a second run updates nothing -- which makes the
+    flag pure overhead. It would also be actively wrong: a user who restores an
+    older database, or upgrades through this version twice, would carry the flag
+    with none of the conversion, and their legacy rows would never be touched
+    again. Cheap and repeatable beats one-shot here.
+    """
+    from collections import defaultdict
+
+    from sqlalchemy import bindparam, text
+
+    # Invert the map before issuing anything: 168 labels collapse onto 12 keys,
+    # so one UPDATE per key with an IN list is 24 statements rather than 336
+    # single-value ones on every boot. Identity rows (an en.ts label that is
+    # spelled the same as its own key) are dropped -- they would match and
+    # rewrite themselves to the value they already hold.
+    by_key: dict[str, list[str]] = defaultdict(list)
+    for label, key in _LEGACY_FAILURE_REASON_LABELS.items():
+        if label != key:
+            by_key[key].append(label)
+
+    total = 0
+    async with conn.begin_nested():
+        # nosec B608 — the only interpolated fragment is `table`, which the loop
+        # below draws from a literal tuple; no caller value reaches the string.
+        # Both the key and the label list are bound parameters. A table name
+        # cannot be expressed as one, which is why it is interpolated at all.
+        for table in ("print_archives", "print_log_entries"):
+            for key, labels in by_key.items():
+                result = await conn.execute(
+                    text(
+                        f"UPDATE {table} SET failure_reason = :key "  # noqa: S608  # nosec B608
+                        "WHERE failure_reason IN :labels"
+                    ).bindparams(bindparam("key"), bindparam("labels", expanding=True)),
+                    {"key": key, "labels": labels},
+                )
+                total += result.rowcount or 0
+
+    if total:
+        logger.info("[#2974] converted %d failure_reason value(s) to the canonical vocabulary", total)
+
+
 async def run_migrations(conn):
     """Run all schema migrations and data backfills on startup.
 
@@ -1293,6 +1747,11 @@ async def run_migrations(conn):
     # them. Fresh installs remain idempotent because create_all() runs first.
     await _migrate_create_finance_tables(conn)
 
+    # Data migration: one vocabulary for failure_reason (#2974). Runs early so
+    # the Failure Analysis widget and the archive editor never observe a
+    # half-converted column.
+    await _migrate_failure_reason_vocabulary(conn)
+
     # Migration: Add parent_run_id column to pipeline_runs (#1425 PR C).
     # Links a retry-failed run back to its parent so the dashboard can show
     # "Retry of run #N" inline. Idempotent on both SQLite and Postgres.
@@ -1303,8 +1762,8 @@ async def run_migrations(conn):
 
     # Migration: Add source_archive_id column to pipeline_runs (#1425 PR B follow-up).
     # Allows a pipeline run to source from an archive's source 3MF in addition
-    # to a library file. Idempotent — _safe_execute swallows the "already exists"
-    # case on both SQLite and Postgres.
+    # to a library file. Idempotent — _safe_execute swallows an already-applied
+    # statement on both SQLite and Postgres.
     await _safe_execute(
         conn,
         "ALTER TABLE pipeline_runs ADD COLUMN source_archive_id INTEGER REFERENCES print_archives(id) ON DELETE SET NULL",
@@ -2065,7 +2524,7 @@ async def run_migrations(conn):
     # timestamp; the type differs by dialect (SQLite DATETIME vs Postgres
     # TIMESTAMP) so an existing-DB upgrade doesn't hit "type datetime does not
     # exist" on Postgres. On a fresh DB create_all() already built the column, so
-    # the ALTER is swallowed as "already exists".
+    # the ALTER is swallowed as already applied.
     #
     # Placed AFTER the print_queue_new2 table-recreate above: that recreate
     # (SQLite-only, and only on ancient DBs whose archive_id is still NOT NULL)
@@ -3267,17 +3726,17 @@ async def run_migrations(conn):
     # SQLite does not support ALTER TABLE ADD CONSTRAINT — handled by __table_args__ at creation.
     # Runs AFTER the backfill so Fall B rows don't fail constraint validation.
     if not is_sqlite():
+        add_constraint = (
+            "ALTER TABLE oidc_providers ADD CONSTRAINT ck_auto_link_requires_verified_email_claim "
+            "CHECK (auto_link_existing_accounts = FALSE OR email_claim != 'email' OR require_email_verified = TRUE)"
+        )
         try:
             async with conn.begin_nested():
-                await conn.execute(
-                    text(
-                        "ALTER TABLE oidc_providers ADD CONSTRAINT ck_auto_link_requires_verified_email_claim "
-                        "CHECK (auto_link_existing_accounts = FALSE OR email_claim != 'email' OR require_email_verified = TRUE)"
-                    )
-                )
+                await conn.execute(text(add_constraint))
         except (OperationalError, ProgrammingError) as exc:
-            msg = str(exc).lower()
-            if "already exists" not in msg:
+            # Classified by SQLSTATE, not by message text: a non-English server
+            # reports the constraint as already present in its own language (#2949).
+            if not _is_already_applied(exc, add_constraint):
                 logger.error(
                     "Security constraint migration FAILED — auto_link safety constraint may not be enforced: %s",
                     exc,
@@ -3905,6 +4364,34 @@ async def run_migrations(conn):
             conn, "ALTER TABLE notification_providers ADD COLUMN on_stock_break_alert BOOLEAN DEFAULT false"
         )
 
+    # Backfill the two flags above. The DEFAULT on those ALTERs only reaches
+    # existing rows when the ALTER is the statement that adds the column -- and
+    # on an install whose notification_providers table was (re)created from
+    # Base.metadata, create_all() had already added them by the time migrations
+    # ran, so _safe_execute swallowed the ALTER as a duplicate column and every
+    # pre-existing row kept NULL. Harmless while nothing read the flags; a 500
+    # on the whole provider list once #2827 declared them on the response
+    # schema, because pydantic will not accept None for a bool.
+    #
+    # false matches both the intent of the DEFAULT above and the behaviour the
+    # rows already have: _get_providers_for_event filters on `.is_(True)`, so a
+    # NULL flag never sent anything. Idempotent -- the WHERE matches nothing on
+    # the second run.
+    async with conn.begin_nested():
+        stock_backfill = await conn.execute(
+            text(
+                "UPDATE notification_providers SET on_stock_reorder_alert = :off WHERE on_stock_reorder_alert IS NULL"
+            ),
+            {"off": False},
+        )
+        stock_backfill_break = await conn.execute(
+            text("UPDATE notification_providers SET on_stock_break_alert = :off WHERE on_stock_break_alert IS NULL"),
+            {"off": False},
+        )
+    repaired = (stock_backfill.rowcount or 0) + (stock_backfill_break.rowcount or 0)
+    if repaired:
+        logger.info("Backfilled %s NULL inventory stock alert flag(s) on notification_providers", repaired)
+
     # Migration: Heal orphan auth-related rows left behind by user-delete
     # on SQLite. user_oidc_links, user_totp, user_otp_codes (introduced in
     # PR #933) and long_lived_tokens (PR #1108) all declare ON DELETE
@@ -4323,6 +4810,16 @@ async def run_migrations(conn):
     # #2603 archive plate_id backfill above so print_archives.plate_id is populated.
     await _migrate_scope_run_filament_to_plate(conn)
 
+    # Backfill: archives written before #2989 have no bed temperature, because
+    # the extractor looked for a key BambuStudio never writes. Re-reads the 3MF
+    # already on disk. One-shot; see the function for why it is gated.
+    await _backfill_archive_bed_temperature(conn)
+
+    # Backfill: library rows typed from the filename alone kept a sliced 3MF
+    # named `Foo.3mf` filed as a source-only project (#2993). Re-reads the zip
+    # already on disk. One-shot, internal rows only; see the function.
+    await _reclassify_sliced_3mf_library_files(conn)
+
     # Migration: Add controls_printer_power to smart_plugs (#2629). Marks
     # whether a plug actually feeds the printer's own power — only then may an
     # auto-off mark the printer offline. Defaults to true so existing plugs
@@ -4344,7 +4841,7 @@ async def run_migrations(conn):
     # ordering was arbitrary. Nullable; the timestamp type differs by dialect
     # (SQLite DATETIME vs Postgres TIMESTAMP) so an existing-DB upgrade doesn't hit
     # "type datetime does not exist" on Postgres. On a fresh DB create_all() already
-    # built the column, so the ALTER is swallowed as "already exists".
+    # built the column, so the ALTER is swallowed as already applied.
     if is_sqlite():
         await _safe_execute(conn, "ALTER TABLE library_files ADD COLUMN fs_modified_at DATETIME")
         await _safe_execute(conn, "ALTER TABLE library_folders ADD COLUMN fs_modified_at DATETIME")
@@ -4437,6 +4934,277 @@ async def run_migrations(conn):
 
     # Migration: typed code columns for spools (#2648).
     await _migrate_add_spool_code_columns(conn)
+    # Migration: storage location sensor alerts (#2824), own column rather than
+    # reusing on_ha_sensor_alert. That column can be scoped to one printer
+    # (printer_id), and a location alert has no printer to scope by — sharing
+    # the column meant a provider narrowed to one printer's sensors silently
+    # also received every drybox alert, with no toggle to separate the two.
+    await _safe_execute(
+        conn, "ALTER TABLE notification_providers ADD COLUMN on_location_ha_sensor_alert BOOLEAN DEFAULT FALSE"
+    )
+
+    # Migration: rename the ha_sensor_alert template (#2824). "Home Assistant
+    # Sensor Alert" was fine as a name while it was the only such template;
+    # next to the new "Storage Location Sensor Alert" it no longer says which
+    # one is the printer's. See _migrate_rename_user_print_template_names for
+    # why this is a plain UPDATE guarded on the old name rather than a
+    # DEFAULT_TEMPLATES re-seed.
+    await _migrate_rename_ha_sensor_alert_template(conn)
+
+    # Migration: back the one-binding-per-(location, entity) rule with a unique
+    # index (#2824). The API's duplicate check is read-then-insert, so two
+    # concurrent creates could both pass it; the index turns the loser into an
+    # IntegrityError the route maps back to the same 400. create_all() adds it
+    # on fresh installs only — this covers databases whose table predates it.
+    await _migrate_location_ha_sensor_unique_binding(conn)
+
+    # Migration: repair the tare of spools the RFID auto-add gave the wrong
+    # Bambu spool row (#2909). Runs last so the spool catalogue it reads is
+    # whatever this database actually holds.
+    await _migrate_repair_rfid_core_weight(conn)
+
+    # Migration: drop the AMS slot markers an older Bambuddy wrote into
+    # Spoolman and the location sync then imported as storage locations.
+    await _migrate_drop_ams_slot_locations(conn)
+
+
+async def _migrate_rename_ha_sensor_alert_template(conn) -> None:
+    """Rename the ha_sensor_alert template to "Printer Sensor Alert" (#2824).
+
+    Renames only if ``name`` is still the old default — an admin who renamed
+    the template themselves keeps their custom name.
+    """
+    from sqlalchemy import text
+
+    await conn.execute(
+        text("UPDATE notification_templates SET name = :new WHERE event_type = :et AND name = :old"),
+        {"new": "Printer Sensor Alert", "et": "ha_sensor_alert", "old": "Home Assistant Sensor Alert"},
+    )
+
+
+async def _migrate_location_ha_sensor_unique_binding(conn) -> None:
+    """Unique index on location_ha_sensors (location_id, entity_id) (#2824).
+
+    Same name and shape as the Index in the model, so fresh installs (which
+    get it from create_all) and upgraded ones end up identical.
+
+    Rows that already violate it — duplicates slipped in through the pre-index
+    race — are collapsed to the oldest row first, because CREATE UNIQUE INDEX
+    refuses to build over duplicates and _safe_execute would re-raise that,
+    aborting startup. The oldest row wins: it is the one the card and the
+    poller cache were already keyed on.
+    """
+    from sqlalchemy import text
+
+    async with conn.begin_nested():
+        await conn.execute(
+            text(
+                "DELETE FROM location_ha_sensors WHERE id NOT IN ("
+                "SELECT MIN(id) FROM location_ha_sensors GROUP BY location_id, entity_id)"
+            )
+        )
+    await _safe_execute(
+        conn,
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_location_ha_sensors_location_entity "
+        "ON location_ha_sensors (location_id, entity_id)",
+    )
+
+
+async def _migrate_drop_ams_slot_locations(conn) -> None:
+    """Remove imported AMS slot markers from the storage-location catalogue.
+
+    Bambuddy used to record which slot a spool was loaded into by writing
+    "<printer> - AMS A1" into Spoolman's ``location`` field. That writer went
+    away when Storage Location became something the user picks (#1114), but the
+    strings stayed on people's Spoolman spools, and
+    ``sync_locations_from_spoolman`` imported every distinct one -- so a printer
+    slot turned up in the Storage Location dropdown as somewhere to put a spool
+    away. Worse, they could not be cleared by hand: the delete route refuses a
+    location that has spools, and in Spoolman mode it counts them by matching
+    that same string, so every marker still on a loaded spool answered 409.
+
+    The import now skips them (``is_ams_slot_location``); this clears the ones
+    already in the catalogue. A row is only deleted when no spool in this
+    database points at it -- neither by ``location_id`` nor by a legacy
+    free-text ``storage_location`` -- so an internal-mode user who has
+    deliberately filed spools under such a name keeps it, dropdown entry and
+    all.
+
+    Spools in Spoolman are not consulted and not touched: their ``location``
+    strings are the user's data on the user's server, and one that still reads
+    "H2D-1 - AMS A1" in the inventory list is telling the truth about what
+    Spoolman holds. It simply stops being offered as a destination, which is
+    the whole point -- those are exactly the markers this cleans up.
+    """
+    from sqlalchemy import text
+
+    from backend.app.services.location_service import is_ams_slot_location, location_name_key
+
+    flag = "_cleanup_ams_slot_locations_done"
+
+    async with conn.begin_nested():
+        already = (
+            await conn.execute(text('SELECT value FROM settings WHERE "key" = :k'), {"k": flag})
+        ).scalar_one_or_none()
+        if already:
+            return
+
+        rows = (await conn.execute(text("SELECT id, name FROM locations"))).fetchall()
+        removed = []
+        for row in rows:
+            if not is_ams_slot_location(row.name):
+                continue
+            in_use = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM spool WHERE location_id = :id "
+                        "OR LOWER(TRIM(COALESCE(storage_location, ''))) = :key"
+                    ),
+                    {"id": row.id, "key": location_name_key(row.name)},
+                )
+            ).scalar_one()
+            if in_use:
+                continue
+            await conn.execute(text("DELETE FROM locations WHERE id = :id"), {"id": row.id})
+            removed.append(row.name)
+
+        if removed:
+            logger.info(
+                "Removed %d AMS slot marker(s) from the storage-location catalogue: %s",
+                len(removed),
+                ", ".join(sorted(removed)),
+            )
+
+        await conn.execute(
+            text('INSERT INTO settings ("key", value) VALUES (:k, :v)'),
+            {"k": flag, "v": "true"},
+        )
+
+
+async def _migrate_repair_rfid_core_weight(conn) -> None:
+    """Correct the tare of RFID-added spools that took the wrong catalogue row (#2909).
+
+    A Bambu roll arrives on the 250 g Low Temp spool, but the lookup that gave
+    an auto-added spool its ``core_weight`` asked for the first row whose name
+    starts "Bambu Lab" and took whatever came back. There are three, and which
+    one is first is up to the database: SQLite returns insertion order in
+    practice, Postgres promises nothing once the table has seen an update. So
+    the same roll could be recorded with a 216 g High Temp tare on one install
+    and correctly on another, and the reporting instance here got 216.
+
+    The tare is not cosmetic. A spool weighed on SpoolBuddy has its remaining
+    filament worked out as ``scale reading - core_weight``, so a 34 g low tare
+    credits the roll with 34 g of filament that is not there and writes a
+    ``weight_used`` 34 g short. That error is a constant: every later print
+    adds to ``weight_used`` on top of it, so adding the difference back is an
+    exact repair however much has been printed since. Only rows that have
+    actually been weighed carry it -- a spool that was never on the scale has
+    a ``weight_used`` derived from the AMS remaining percentage, which the tare
+    never touched.
+
+    Which rows: ``data_origin = 'rfid_auto'`` narrows it to spools this code
+    path created, and a ``core_weight`` matching one of the *other* Bambu
+    catalogue rows is the signature of the broken lookup. Reading the weights
+    out of the catalogue rather than hardcoding 216 and 253 keeps it correct on
+    an install whose catalogue has been edited.
+
+    One case cannot be told apart and is stated rather than hidden: a user who
+    moved an RFID roll onto a genuine High Temp spool and set its tare to 216
+    by hand looks identical to a row the lookup got wrong, and is normalised
+    with them. Keying on ``core_weight_catalog_id IS NULL`` instead would not
+    have rescued them -- the spool form's weight picker auto-selects the only
+    catalogue row matching the weight and writes its id on the next save, so
+    that column says only whether the form was ever opened.
+
+    Gated to run exactly once via a settings flag, so a user who deliberately
+    sets one of these tares afterwards keeps it.
+    """
+    from sqlalchemy import bindparam, text
+
+    # The same two values the creating path uses, imported rather than repeated:
+    # a repair that looked for a different row than the code writes would leave
+    # the tare it was built to correct in place. Imported inside the function to
+    # keep this module free of a service-layer dependency at import time.
+    from backend.app.services.spool_tag_matcher import (
+        BAMBU_PLASTIC_SPOOL_CATALOG_NAME,
+        BAMBU_PLASTIC_SPOOL_CORE_WEIGHT,
+    )
+
+    flag = "_backfill_2909_rfid_core_weight_done"
+
+    async with conn.begin_nested():
+        already = (
+            await conn.execute(text('SELECT value FROM settings WHERE "key" = :k'), {"k": flag})
+        ).scalar_one_or_none()
+        if already:
+            return
+
+        # The row that names the spool an RFID roll actually arrives on. Its
+        # absence is not an error -- a catalogue the user has pruned still gets
+        # the documented default.
+        correct = (
+            await conn.execute(
+                text("SELECT id, weight FROM spool_catalog WHERE UPPER(name) = :name ORDER BY id LIMIT 1"),
+                {"name": BAMBU_PLASTIC_SPOOL_CATALOG_NAME.upper()},
+            )
+        ).fetchone()
+        correct_id = correct[0] if correct else None
+        correct_weight = correct[1] if correct else BAMBU_PLASTIC_SPOOL_CORE_WEIGHT
+
+        bambu_weights = {
+            row[0]
+            for row in (
+                await conn.execute(
+                    text("SELECT weight FROM spool_catalog WHERE UPPER(name) LIKE :prefix"),
+                    {"prefix": "BAMBU LAB%"},
+                )
+            ).fetchall()
+        }
+        wrong_weights = sorted(bambu_weights - {correct_weight})
+
+        repaired = 0
+        reweighed = 0
+        if wrong_weights:
+            rows = (
+                await conn.execute(
+                    text(
+                        "SELECT id, core_weight, label_weight, weight_used, last_weighed_at FROM spool "
+                        "WHERE data_origin = 'rfid_auto' AND core_weight IN :wrong"
+                    ).bindparams(bindparam("wrong", expanding=True)),
+                    {"wrong": wrong_weights},
+                )
+            ).fetchall()
+
+            for row in rows:
+                delta = correct_weight - row.core_weight
+                weight_used = row.weight_used or 0.0
+                if row.last_weighed_at is not None:
+                    weight_used = min(max(0.0, weight_used + delta), float(row.label_weight or 0))
+                    reweighed += 1
+                await conn.execute(
+                    text(
+                        "UPDATE spool SET core_weight = :cw, core_weight_catalog_id = :cid, "
+                        "weight_used = :wu WHERE id = :id"
+                    ),
+                    {"cw": correct_weight, "cid": correct_id, "wu": weight_used, "id": row.id},
+                )
+                repaired += 1
+
+        if repaired:
+            logger.info(
+                "[#2909] Corrected the spool tare on %d RFID-added spool(s) to %d g; "
+                "%d of them had been weighed and had their used weight adjusted with it",
+                repaired,
+                correct_weight,
+                reweighed,
+            )
+
+        # Marked done even when nothing matched, so the one-shot never reopens
+        # a tare the user has since set for themselves.
+        await conn.execute(
+            text('INSERT INTO settings ("key", value) VALUES (:k, :v)'),
+            {"k": flag, "v": "true"},
+        )
 
 
 async def _migrate_add_spool_code_columns(conn) -> None:
