@@ -4,8 +4,8 @@ Bambuddy reads a print's 3MF, cover and timelapse off the printer over implicit
 FTPS on port 990. On every Bambu model that port serves **external storage only**
 -- the SD card or USB stick. It is not a view of the printer's filesystem.
 
-H2-series and P2S firmware default to keeping the sliced file on internal eMMC
-instead, and BambuStudio uploads there over a separate service on port 6000
+H2-series, P2S and X2D firmware default to keeping the sliced file on internal
+eMMC instead, and BambuStudio uploads there over a separate service on port 6000
 (the "BambuTunnelLocal" protocol -- see #2762, which tracks implementing it).
 The dispatch says where it went: the ``project_file`` command carries ``url``,
 which is ``ftp://<name>`` for external storage and ``brtc://emmc/<name>`` for
@@ -65,6 +65,36 @@ _INTERNAL_FILE_PREFIXES = ("/userdata/",)
 # own explanation and its own advice. Keep them stable.
 REASON_INTERNAL_STORAGE = "internal_storage"
 REASON_NO_EXTERNAL_STORAGE = "no_external_storage"
+
+# Same verdict as REASON_INTERNAL_STORAGE, different cause -- and the cause is
+# the whole of the advice. `brtc://emmc/<name>` is a *dispatch* that chose
+# internal storage: a slicer sent the file and the printer filed it where port
+# 990 cannot serve it, which the operator can change by sending it elsewhere.
+# `file:///userdata/...` is a print of a file that was already on the printer --
+# a touchscreen re-print, a Handy start, a Studio send-to-storage printed later
+# -- so there was no dispatch to aim anywhere, and telling that operator to pick
+# "External" in Send describes a step they never took (#1820).
+REASON_INTERNAL_HISTORY = "internal_history"
+
+# Not a storage verdict — the file's location was never in question. The
+# printer's FTPS service was inside its post-failed-handshake cool-off when the
+# print started, so the sweep was skipped without a single connection. Stamped
+# on the fallback archive by the print-start handler rather than returned by
+# `_verdict`, and unlike the two above it is temporary: it is the one reason a
+# retry is worth scheduling (#2957).
+REASON_FTPS_COOLOFF = "ftps_cooloff"
+
+# Also not a storage verdict, and the file's location was never in question
+# here either: the print went to external storage, FTPS served it, and the
+# transfer still did not finish inside its budget. At print start the printer is
+# also handling MQTT, the camera and the job upload, and a large 3MF does not
+# reliably complete against that -- #3063's reporter watched the same 19MB file
+# download successfully three times in the two minutes after the archive flow
+# gave up on it. Like the cool-off above and unlike the three storage verdicts,
+# this one is temporary and worth a retry; unlike the cool-off, nothing has to
+# expire first. Stamped by the print-start handler, which is the only place that
+# knows an attempt was made and failed in transit rather than answering 550.
+REASON_FTP_TRANSFER_FAILED = "ftp_transfer_failed"
 
 # Where a sliced file has ever been found over FTPS, in the order the sweep in
 # `main.py` tries them -- root first, which is where A1/P1-series uploads land
@@ -222,6 +252,18 @@ def last_print_storage_verdict(state: object | None) -> StorageVerdict:
     return _verdict(getattr(state, "last_project_url", None), state)
 
 
+def _internal_reason(project_url: str | None) -> str:
+    """Which flavour of "internal" *project_url* names.
+
+    Only ever reached on a negative verdict, so the URL is one of the two
+    shapes :func:`url_is_external_storage` answers False for.
+    """
+    if not isinstance(project_url, str):
+        return REASON_INTERNAL_STORAGE
+    scheme = project_url.partition("://")[0].lower()
+    return REASON_INTERNAL_HISTORY if scheme == _LOCAL_FILE_SCHEME else REASON_INTERNAL_STORAGE
+
+
 def _verdict(project_url: str | None, state: object | None) -> StorageVerdict:
     if state is None:
         return _REACHABLE
@@ -237,7 +279,7 @@ def _verdict(project_url: str | None, state: object | None) -> StorageVerdict:
         # the printer already said.
         return StorageVerdict(
             reachable=False,
-            reason=REASON_INTERNAL_STORAGE,
+            reason=_internal_reason(project_url),
             probe_filename=probe_filename_from_url(project_url) if external_storage_present(state) else None,
         )
     if external is True:

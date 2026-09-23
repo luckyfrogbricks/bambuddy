@@ -7,7 +7,24 @@ import type { SpoolBuddyOutletContext } from '../../components/spoolbuddy/SpoolB
 import { api } from '../../api/client';
 import type { PrinterStatus, AMSTray, SpoolAssignment } from '../../api/client';
 import { getGlobalTrayId, getFillBarColor, getSpoolmanFillLevel, getFallbackSpoolTag, formatSlotLabel, isBambuLabSpool, resolveSlotNozzleDiameter } from '../../utils/amsHelpers';
-import { getSwatchStyle } from '../../utils/colors';
+import { getSwatchStyle, resolveSpoolColorName } from '../../utils/colors';
+
+/**
+ * " - Candy Red", or nothing when the colour has no name we can show.
+ *
+ * Not `spool.color_name`: a Bambu tag often carries no colour name, and
+ * Spoolman has no field for one at all, so the stored value is frequently
+ * empty or the spool's subtype standing in for it. The catalog resolves the
+ * swatch's own hex instead (#3090).
+ */
+function colorNameSuffix(spool: {
+  color_name: string | null;
+  rgba: string | null;
+  color_name_is_synthesized?: boolean;
+}): string {
+  const name = resolveSpoolColorName(spool.color_name, spool.rgba, spool.color_name_is_synthesized);
+  return name ? ` - ${name}` : '';
+}
 import { AmsUnitCard, HumidityIndicator, TemperatureIndicator, NozzleBadge } from '../../components/spoolbuddy/AmsUnitCard';
 import type { AmsThresholds } from '../../components/spoolbuddy/AmsUnitCard';
 import { ConfigureAmsSlotModal } from '../../components/ConfigureAmsSlotModal';
@@ -756,7 +773,8 @@ export function SpoolBuddyAmsPage() {
                       )}
                       <span className="text-sm text-white">
                         {assignment.spool.brand ? `${assignment.spool.brand} ` : ''}{assignment.spool.material}
-                        {assignment.spool.color_name ? ` - ${assignment.spool.color_name}` : ''}
+                        {assignment.spool.subtype ? ` ${assignment.spool.subtype}` : ''}
+                        {colorNameSuffix(assignment.spool)}
                       </span>
                       <span className="text-[10px] font-mono text-zinc-500 shrink-0 ml-auto">#{assignment.spool.id}</span>
                     </div>
@@ -789,7 +807,8 @@ export function SpoolBuddyAmsPage() {
                       )}
                       <span className="text-sm text-white">
                         {spoolmanAssignedSpool.brand ? `${spoolmanAssignedSpool.brand} ` : ''}{spoolmanAssignedSpool.material}
-                        {spoolmanAssignedSpool.color_name ? ` - ${spoolmanAssignedSpool.color_name}` : ''}
+                        {spoolmanAssignedSpool.subtype ? ` ${spoolmanAssignedSpool.subtype}` : ''}
+                        {colorNameSuffix(spoolmanAssignedSpool)}
                       </span>
                     </div>
                   </div>

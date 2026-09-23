@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, waitFor, fireEvent } from '@testing-library/react';
+import { screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { render } from '../utils';
+import { setColorCatalog, __resetColorCatalogForTests } from '../../utils/colors';
 import { LabelTemplatePickerModal } from '../../components/LabelTemplatePickerModal';
 import { api } from '../../api/client';
 
@@ -37,6 +38,47 @@ beforeEach(() => {
   vi.spyOn(window, 'open').mockImplementation(() => ({}) as Window);
 });
 
+describe('a colour name that only the catalog knows (#3090)', () => {
+  // The list labels a spool by its colour, and most Bambu spools carry no
+  // colour name — the name comes from resolving the swatch's hex against the
+  // catalog, which is fetched once at startup. The filter that builds this
+  // list is memoised, so it has to be told the catalog arrived; otherwise a
+  // search typed first keeps the empty result it computed without one.
+  const nameless = [{ id: 9, material: 'PLA', subtype: 'Silk+', brand: 'Bambu Lab', color_name: null, rgba: 'D02727FF' }];
+
+  beforeEach(() => {
+    __resetColorCatalogForTests();
+  });
+
+  const openModal = () =>
+    render(
+      <LabelTemplatePickerModal
+        isOpen
+        onClose={vi.fn()}
+        availableSpools={nameless}
+        initialSelectedIds={[]}
+        spoolmanMode={false}
+      />,
+    );
+
+  it('labels the spool from the catalog instead of falling back to its material', () => {
+    setColorCatalog({ d02727: 'Candy Red' });
+    openModal();
+
+    expect(screen.getByText(/Candy Red/)).toBeInTheDocument();
+  });
+
+  it('re-filters when the catalog arrives after the query was typed', async () => {
+    openModal();
+    fireEvent.change(screen.getByPlaceholderText(/Search/i), { target: { value: 'candy' } });
+    expect(screen.queryByText(/Candy Red/)).not.toBeInTheDocument();
+
+    setColorCatalog({ d02727: 'Candy Red' });
+
+    await waitFor(() => expect(screen.getByText(/Candy Red/)).toBeInTheDocument());
+  });
+});
+
 describe('LabelTemplatePickerModal', () => {
   it('does not render when closed', () => {
     render(
@@ -65,6 +107,22 @@ describe('LabelTemplatePickerModal', () => {
     expect(screen.getByText(/Blue · Sunlu/)).toBeInTheDocument();
     expect(screen.getByText(/Black/)).toBeInTheDocument();
     expect(screen.getByText(/Ivory · Polymaker/)).toBeInTheDocument();
+  });
+
+  it('keeps the panel from becoming a programmatically scrollable clipping container', () => {
+    render(
+      <LabelTemplatePickerModal
+        isOpen={true}
+        onClose={vi.fn()}
+        availableSpools={SPOOLS}
+        initialSelectedIds={[1, 2, 3, 4]}
+        spoolmanMode={false}
+      />,
+    );
+
+    const panel = screen.getByTestId('label-template-picker-panel');
+    expect(panel).toHaveClass('overflow-clip');
+    expect(panel).not.toHaveClass('overflow-hidden');
   });
 
   it('shows the live selected count in the header', () => {
@@ -208,6 +266,7 @@ describe('LabelTemplatePickerModal', () => {
         spool_ids: [1, 3],
         template: 'box_62x29',
         monochrome: false,
+        starting_position: 1,
       });
     });
     await waitFor(() => expect(onClose).toHaveBeenCalled());
@@ -234,6 +293,7 @@ describe('LabelTemplatePickerModal', () => {
         spool_ids: [1],
         template: 'ams_holder_75x55',
         monochrome: false,
+        starting_position: 1,
       });
     });
     expect(api.printSpoolLabels).not.toHaveBeenCalled();
@@ -364,6 +424,7 @@ describe('LabelTemplatePickerModal', () => {
         spool_ids: [1, 4, 2, 3],
         template: 'box_62x29',
         monochrome: false,
+        starting_position: 1,
       });
     });
   });
@@ -389,6 +450,7 @@ describe('LabelTemplatePickerModal', () => {
         spool_ids: [1, 2, 3, 4],
         template: 'box_40x30',
         monochrome: false,
+        starting_position: 1,
       });
     });
   });
@@ -413,7 +475,69 @@ describe('LabelTemplatePickerModal', () => {
         spool_ids: [1],
         template: 'box_40x30',
         monochrome: true,
+        starting_position: 1,
       });
     });
+  });
+
+  it('sends the selected starting position for an Avery sheet', async () => {
+    vi.mocked(api.printSpoolLabels).mockResolvedValue(PDF_BLOB);
+    render(
+      <LabelTemplatePickerModal
+        isOpen={true}
+        onClose={vi.fn()}
+        availableSpools={SPOOLS}
+        initialSelectedIds={[1]}
+        spoolmanMode={false}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('label-starting-position'), { target: { value: '8' } });
+    expect(screen.getByTestId('label-starting-position-status')).toHaveTextContent(/Positions 1 through 7/i);
+    fireEvent.click(screen.getByTestId('print-labels-avery_5160'));
+
+    await waitFor(() => {
+      expect(api.printSpoolLabels).toHaveBeenCalledWith({
+        spool_ids: [1],
+        template: 'avery_5160',
+        monochrome: false,
+        starting_position: 8,
+      });
+    });
+  });
+
+  it('renders a single skipped position without treating the value as a pluralization key', () => {
+    render(
+      <LabelTemplatePickerModal
+        isOpen={true}
+        onClose={vi.fn()}
+        availableSpools={SPOOLS}
+        initialSelectedIds={[1]}
+        spoolmanMode={false}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('label-starting-position'), { target: { value: '2' } });
+    expect(screen.getByTestId('label-starting-position-status')).toHaveTextContent(
+      'Positions 1 through 1 will be left blank on the first sheet.',
+    );
+  });
+
+  it('explains each Avery template capacity when disabling it', () => {
+    render(
+      <LabelTemplatePickerModal
+        isOpen={true}
+        onClose={vi.fn()}
+        availableSpools={SPOOLS}
+        initialSelectedIds={[1]}
+        spoolmanMode={false}
+      />,
+    );
+
+    fireEvent.change(screen.getByTestId('label-starting-position'), { target: { value: '25' } });
+    const l7160Button = screen.getByTestId('print-labels-avery_l7160');
+    expect(l7160Button).toBeDisabled();
+    expect(within(l7160Button).getByText(/between 1 and 21/)).toBeInTheDocument();
+    expect(screen.getByTestId('print-labels-avery_5160')).toBeEnabled();
   });
 });

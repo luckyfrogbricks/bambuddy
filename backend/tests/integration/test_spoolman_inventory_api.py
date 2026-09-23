@@ -380,6 +380,88 @@ class TestSpoolmanInventoryCRUD:
 
     @pytest.mark.asyncio
     @pytest.mark.integration
+    async def test_create_spool_keeps_a_clear_colour_translucent(
+        self,
+        async_client: AsyncClient,
+        spoolman_settings,
+        mock_spoolman_client,
+    ):
+        """#2912: the create route truncated rgba to six characters, so entering
+        "fully transparent" by hand landed on the same opaque black as the AMS
+        case in the report."""
+        payload = {
+            "material": "PLA",
+            "rgba": "00000000",
+            "label_weight": 1000,
+            "weight_used": 0,
+        }
+        response = await async_client.post("/api/v1/spoolman/inventory/spools", json=payload)
+
+        assert response.status_code == 200
+        assert mock_spoolman_client.find_or_create_filament.call_args.kwargs["color_hex"] == "00000000"
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_create_spool_keeps_an_opaque_colour_at_six(
+        self,
+        async_client: AsyncClient,
+        spoolman_settings,
+        mock_spoolman_client,
+    ):
+        """The opaque case has to stay six characters or every create starts
+        writing a shape the rest of the instance does not hold."""
+        payload = {
+            "material": "PLA",
+            "rgba": "FF0000FF",
+            "label_weight": 1000,
+            "weight_used": 0,
+        }
+        response = await async_client.post("/api/v1/spoolman/inventory/spools", json=payload)
+
+        assert response.status_code == 200
+        assert mock_spoolman_client.find_or_create_filament.call_args.kwargs["color_hex"] == "FF0000"
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_update_alpha_only_edit_reaches_the_filament(
+        self,
+        async_client: AsyncClient,
+        spoolman_settings,
+        mock_spoolman_client,
+    ):
+        """#2912: making a spool translucent is a real change to the filament's
+        colour. Comparing bare RGB prefixes would call it a no-op and the edit
+        would never land."""
+        # Sample filament is FF0000; make it half-transparent.
+        payload = {"rgba": "FF000080"}
+        response = await async_client.patch("/api/v1/spoolman/inventory/spools/42", json=payload)
+
+        assert response.status_code == 200
+        mock_spoolman_client.patch_filament.assert_called_once()
+        assert mock_spoolman_client.patch_filament.call_args.args[1]["color_hex"] == "FF000080"
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_update_with_the_round_tripped_opaque_rgba_is_a_no_op(
+        self,
+        async_client: AsyncClient,
+        spoolman_settings,
+        mock_spoolman_client,
+    ):
+        """#2912: the read side hands the frontend FF0000FF for a filament stored
+        as FF0000, and the edit form sends it straight back. Comparing raw strings
+        would make metadata_unchanged permanently False and PATCH the filament on
+        every no-op edit.
+        """
+        payload = {"rgba": "FF0000FF", "note": "unrelated change"}
+        response = await async_client.patch("/api/v1/spoolman/inventory/spools/42", json=payload)
+
+        assert response.status_code == 200
+        mock_spoolman_client.patch_filament.assert_not_called()
+        mock_spoolman_client.find_or_create_filament.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
     async def test_update_shared_filament_falls_back_to_find_or_create(
         self,
         async_client: AsyncClient,
@@ -2000,6 +2082,119 @@ class TestLinkTagDuplicate:
         assert resp.status_code == 409
         detail = resp.json()["detail"]
         assert "42" in str(detail)
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_the_409_is_the_same_structured_detail_as_the_built_in_route(
+        self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
+    ):
+        """#3110: one shape for both inventory modes, not two prose sentences.
+
+        The built-in route said "already linked to another active spool" and
+        named nobody; this one named the spool but only inside a sentence. A
+        client had to parse prose, and a different sentence per mode.
+        """
+        resp = await async_client.patch(
+            "/api/v1/spoolman/inventory/spools/99/tag",
+            json={"tray_uuid": "AABBCCDDEEFF0011AABBCCDDEEFF0011"},
+        )
+
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert detail["code"] == "tag_already_linked"
+        assert detail["spool_id"] == 42
+        assert detail["field"] == "tray_uuid"
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_the_field_follows_the_precedence_the_tag_itself_uses(
+        self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
+    ):
+        """tray_uuid wins over tag_uid when both are sent, so `field` says so."""
+        mock_spoolman_client.get_all_spools.return_value = [
+            {**SAMPLE_SPOOLMAN_SPOOL, "id": 42, "extra": {"tag": '"AABBCCDDEEFF0011"'}}
+        ]
+
+        resp = await async_client.patch(
+            "/api/v1/spoolman/inventory/spools/99/tag",
+            json={"tag_uid": "AABBCCDDEEFF0011"},
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["field"] == "tag_uid"
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_duplicate_holders_yield_the_lowest_id(
+        self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
+    ):
+        """Spoolman has no unique constraint on extra.tag either.
+
+        Whichever row the scan reached first was an arbitrary answer; the
+        built-in route names the lowest id, so this one does too.
+        """
+        tag = '"AABBCCDDEEFF0011AABBCCDDEEFF0011"'
+        mock_spoolman_client.get_all_spools.return_value = [
+            {**SAMPLE_SPOOLMAN_SPOOL, "id": 77, "extra": {"tag": tag}},
+            {**SAMPLE_SPOOLMAN_SPOOL, "id": 42, "extra": {"tag": tag}},
+        ]
+
+        resp = await async_client.patch(
+            "/api/v1/spoolman/inventory/spools/99/tag",
+            json={"tray_uuid": "AABBCCDDEEFF0011AABBCCDDEEFF0011"},
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["spool_id"] == 42
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_a_malformed_row_after_the_holder_does_not_sink_the_request(
+        self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
+    ):
+        """extra is free-form and edited outside Bambuddy.
+
+        Naming the lowest id means reading every row, where the old loop
+        stopped at its first match -- so a row whose extra.tag is a JSON null
+        (which .get("tag", "") hands back as None, not the default) sits
+        between the caller and their 409 in a way it never used to.
+        """
+        tag = '"AABBCCDDEEFF0011AABBCCDDEEFF0011"'
+        mock_spoolman_client.get_all_spools.return_value = [
+            {**SAMPLE_SPOOLMAN_SPOOL, "id": 42, "extra": {"tag": tag}},
+            {**SAMPLE_SPOOLMAN_SPOOL, "id": 55, "extra": {"tag": None}},
+            {**SAMPLE_SPOOLMAN_SPOOL, "id": 56, "extra": {"tag": 12345}},
+            {**SAMPLE_SPOOLMAN_SPOOL, "id": 57, "extra": None},
+            {**SAMPLE_SPOOLMAN_SPOOL, "id": 58, "extra": []},
+        ]
+
+        resp = await async_client.patch(
+            "/api/v1/spoolman/inventory/spools/99/tag",
+            json={"tray_uuid": "AABBCCDDEEFF0011AABBCCDDEEFF0011"},
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["spool_id"] == 42
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_a_malformed_row_is_not_itself_read_as_a_holder(
+        self, async_client: AsyncClient, spoolman_settings, mock_spoolman_client
+    ):
+        """A link with no real conflict still succeeds past those rows."""
+        mock_spoolman_client.get_all_spools.return_value = [
+            {**SAMPLE_SPOOLMAN_SPOOL, "id": 55, "extra": {"tag": None}},
+            {**SAMPLE_SPOOLMAN_SPOOL, "id": 56, "extra": {"tag": 12345}},
+            {**SAMPLE_SPOOLMAN_SPOOL, "id": 57, "extra": None},
+        ]
+
+        resp = await async_client.patch(
+            "/api/v1/spoolman/inventory/spools/42/tag",
+            json={"tag_uid": "AABBCCDD112233"},
+        )
+
+        assert resp.status_code == 200
+        mock_spoolman_client.update_spool_full.assert_called_once()
 
 
 class TestSpoolmanInventoryUpdateCoreWeight:

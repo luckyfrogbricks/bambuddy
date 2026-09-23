@@ -849,6 +849,7 @@ class TestPrinterStateToDict:
         state.raw_data = {}
         state.stg_cur = -1  # No calibration stage active
         state.firmware_version = None
+        state.extruder_slots = {}
         return state
 
     def test_fila_switch_and_inlets_ride_the_websocket(self, mock_state):
@@ -874,7 +875,52 @@ class TestPrinterStateToDict:
             "out_extruders": [1, 0],
             "stat": 0,
             "info": 1,
+            "ready": True,
         }
+
+    def test_a_switch_is_not_ready_until_every_ams_has_an_inlet(self, mock_state):
+        """An AMS with no inlet binding means the switch cannot route a load.
+
+        The load dialog blocks on this rather than publishing a command the
+        firmware will drop, the same way BambuStudio's DevFilaSwitch::IsReady
+        gates its own dialog.
+        """
+        from backend.app.services.bambu_mqtt import FilaSwitchState
+
+        mock_state.fila_switch = FilaSwitchState(installed=True)
+        mock_state.raw_data = {"ams": [{"id": "0", "tray": []}, {"id": "1", "tray": []}]}
+        mock_state.ams_switch_inlet = {"0": "A"}
+
+        assert printer_state_to_dict(mock_state)["fila_switch"]["ready"] is False
+
+        mock_state.ams_switch_inlet = {"0": "A", "1": "B"}
+
+        assert printer_state_to_dict(mock_state)["fila_switch"]["ready"] is True
+
+    def test_extruder_slots_ride_the_websocket(self, mock_state):
+        """Which hotend holds which slot has to travel with every push.
+
+        The AMS slot menu decides from it which hotend the load dialog may
+        offer, and tray_now cannot stand in: it is one value for the whole
+        printer, so with both hotends loaded it names only one of them.
+        """
+        from backend.app.services.bambu_mqtt import ExtruderSlot
+
+        mock_state.extruder_slots = {
+            0: ExtruderSlot(ams_id=0, slot_id=2, has_filament=True),
+            1: ExtruderSlot(ams_id=None, slot_id=None, has_filament=False),
+        }
+
+        result = printer_state_to_dict(mock_state)
+
+        assert result["extruder_slots"] == {
+            "0": {"ams_id": 0, "slot_id": 2, "has_filament": True},
+            "1": {"ams_id": None, "slot_id": None, "has_filament": False},
+        }
+
+    def test_extruder_slots_are_empty_when_unreported(self, mock_state):
+        """Printers outside the H2/X2 series never send the block."""
+        assert printer_state_to_dict(mock_state)["extruder_slots"] == {}
 
     def test_inlets_are_dropped_without_a_switch(self, mock_state):
         """A binding must not outlive the accessory being unplugged."""
@@ -1653,48 +1699,6 @@ class TestSupportsChamberTemp:
         assert supports_chamber_temp("N2S") is False
         # A1 Mini
         assert supports_chamber_temp("N1") is False
-
-
-class TestIsBedSlinger:
-    """Tests for is_bed_slinger helper function (#1334)."""
-
-    def test_a1_series_is_bed_slinger(self):
-        """A1 / A1 Mini are open-frame bed-slingers — Z axis is the toolhead."""
-        from backend.app.services.printer_manager import is_bed_slinger
-
-        assert is_bed_slinger("A1") is True
-        assert is_bed_slinger("A1 Mini") is True
-        assert is_bed_slinger("A1MINI") is True
-        assert is_bed_slinger("A1-MINI") is True
-
-    def test_a1_internal_codes_recognised(self):
-        """Internal MQTT/SSDP codes for A1 family must also classify as bed-slinger."""
-        from backend.app.services.printer_manager import is_bed_slinger
-
-        # A1 Mini
-        assert is_bed_slinger("N1") is True
-        # A1
-        assert is_bed_slinger("N2S") is True
-
-    def test_bed_on_z_models_not_bed_slingers(self):
-        """X1 / P1 / H2 / H2C / H2D / H2S / P2S all have the bed on Z."""
-        from backend.app.services.printer_manager import is_bed_slinger
-
-        for model in ("X1", "X1C", "X1E", "P1P", "P1S", "P2S", "H2C", "H2D", "H2DPRO", "H2S"):
-            assert is_bed_slinger(model) is False, f"{model} should NOT be classified as bed-slinger"
-
-    def test_none_model_returns_false(self):
-        from backend.app.services.printer_manager import is_bed_slinger
-
-        assert is_bed_slinger(None) is False
-        assert is_bed_slinger("") is False
-
-    def test_case_insensitive(self):
-        from backend.app.services.printer_manager import is_bed_slinger
-
-        assert is_bed_slinger("a1") is True
-        assert is_bed_slinger("a1 mini") is True
-        assert is_bed_slinger("x1c") is False
 
 
 class TestSupportsDrying:

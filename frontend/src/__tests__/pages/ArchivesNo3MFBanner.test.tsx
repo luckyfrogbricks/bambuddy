@@ -8,6 +8,16 @@
  * storage that FTPS does not serve at all. #2780's reporter followed that
  * advice, and #1170's before them.
  *
+ * A third cause joined them in #1820: a print started from the printer's own
+ * screen, where no slicer was involved at all and both of the wordings above
+ * describe a step the operator never took.
+ *
+ * And a fourth, which is why this file grew again: a printer whose file service
+ * refused the TLS handshake, so no lookup ever ran. #2957 recorded that cause
+ * and nothing surfaced it, so those installs fell to the generic wording and
+ * were told to switch on a setting that was already on, about a file they could
+ * see sitting on the stick.
+ *
  * So these assert the wording actually shown, not just that a banner rendered.
  */
 
@@ -62,6 +72,22 @@ describe('ArchivesPage no-3MF banner', () => {
     expect(screen.getByText('Why this happens')).toBeInTheDocument();
   });
 
+  it('does not blame a slicer that was never involved', async () => {
+    // #1820: a print started from the printer's own screen sends nothing, so
+    // both the generic wording ("turn the setting on") and the internal-storage
+    // wording ("use Send with External") describe a step that never happened.
+    mockWarning({ has_fallback: true, reason: 'internal_history' });
+
+    render(<ArchivesPage />);
+
+    expect(
+      await screen.findByText(/started from a file already on the printer/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('See install step 4')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Store sent files on external storage/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Why this happens')).toBeInTheDocument();
+  });
+
   it('names the empty slot, and offers no link because there is nothing to read', async () => {
     mockWarning({ has_fallback: true, reason: 'no_external_storage' });
 
@@ -70,6 +96,36 @@ describe('ArchivesPage no-3MF banner', () => {
     expect(await screen.findByText(/no storage in the printer/i)).toBeInTheDocument();
     expect(screen.queryByText('See install step 4')).not.toBeInTheDocument();
     expect(screen.queryByText('Why this happens')).not.toBeInTheDocument();
+  });
+
+  it('reports a refused handshake as the printer, not as the slicer', async () => {
+    mockWarning({ has_fallback: true, reason: 'ftps_cooloff' });
+
+    render(<ArchivesPage />);
+
+    expect(
+      await screen.findByText(/refused the file connection/i),
+    ).toBeInTheDocument();
+    // The whole point: nothing here may read as a slicer setting the user
+    // should go and change, because there is nothing they can change.
+    expect(screen.queryByText('See install step 4')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Store sent files on external storage/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Why this happens')).toBeInTheDocument();
+  });
+
+  it('reports a transfer that ran out of time as the transfer, not as the slicer', async () => {
+    // #3063: the card had the file and the printer served it three times in the
+    // two minutes after Bambuddy gave up. Telling that owner to switch on
+    // "Store sent files on external storage" describes a setting that was
+    // already on and had already worked.
+    mockWarning({ has_fallback: true, reason: 'ftp_transfer_failed' });
+
+    render(<ArchivesPage />);
+
+    expect(await screen.findByText(/file transfer ran out of time/i)).toBeInTheDocument();
+    expect(screen.queryByText('See install step 4')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Store sent files on external storage/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Why this happens')).toBeInTheDocument();
   });
 
   it('shows nothing at all when no print fell back', async () => {
@@ -87,7 +143,14 @@ describe('ArchivesPage no-3MF banner', () => {
     // The variant suffix is built by string concatenation, so a typo in one
     // locale key surfaces as a raw "archives.no3mfBanner.titleX" on screen
     // instead of failing anything.
-    for (const reason of [null, 'internal_storage', 'no_external_storage']) {
+    for (const reason of [
+      null,
+      'internal_storage',
+      'no_external_storage',
+      'internal_history',
+      'ftps_cooloff',
+      'ftp_transfer_failed',
+    ]) {
       localStorage.clear();
       mockWarning({ has_fallback: true, reason });
 

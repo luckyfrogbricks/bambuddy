@@ -31,6 +31,10 @@ vi.mock('../../api/client', () => ({
     createSpoolmanInventorySpool: vi.fn().mockResolvedValue({ id: 88 }),
     updateSpool: vi.fn().mockResolvedValue({ id: 1 }),
     saveSpoolKProfiles: vi.fn().mockResolvedValue([]),
+    getSpoolFilamentPresets: vi.fn().mockResolvedValue([]),
+    saveSpoolFilamentPresets: vi.fn().mockResolvedValue([]),
+    getSpoolmanFilamentPresets: vi.fn().mockResolvedValue([]),
+    saveSpoolmanFilamentPresets: vi.fn().mockResolvedValue([]),
     saveSpoolmanKProfiles: vi.fn().mockResolvedValue([]),
     updateSpoolmanInventorySpool: vi.fn().mockResolvedValue({ id: 42 }),
     bulkCreateSpoolmanInventorySpools: vi.fn().mockResolvedValue({
@@ -74,6 +78,18 @@ vi.mock('../../contexts/ToastContext', async (importOriginal) => {
 });
 
 import { api } from '../../api/client';
+
+/**
+ * Open the spool form's "Color & Cost" tab.
+ *
+ * The form is split across three tabs -- Filament (identity + preset), Color &
+ * Cost (colour, spool weights, price, category, location) and Printers
+ * (per-model preset + per-hotend K profile). Fields that used to sit in one
+ * long scroll under Filament now need their tab opened first.
+ */
+function openColorAndCostTab() {
+  fireEvent.click(screen.getByText('Color & Cost'));
+}
 
 const existingSpool: InventorySpool = {
   id: 1,
@@ -159,6 +175,8 @@ describe('SpoolFormModal weightTouched', () => {
       expect(screen.getByText('Edit Spool')).toBeInTheDocument();
     });
 
+    openColorAndCostTab();
+
     // The remaining weight is (label_weight - weight_used) = 1000 - 300 = 700.
     // The input is a number input displaying 700. Find it by its displayed value.
     const remainingInput = screen.getByDisplayValue('700');
@@ -236,6 +254,8 @@ describe('SpoolFormModal weightTouched', () => {
       expect(screen.getByText('Edit Spool')).toBeInTheDocument();
     });
 
+    openColorAndCostTab();
+
     // Change the note field (unrelated to catalog ID)
     const noteInputs = screen.getAllByPlaceholderText(/note/i);
     expect(noteInputs.length).toBeGreaterThan(0);
@@ -277,6 +297,8 @@ describe('SpoolFormModal weightTouched', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'Add Spool' })).toBeInTheDocument();
     });
+
+    openColorAndCostTab();
 
     // Wait for catalog to load
     await waitFor(() => {
@@ -579,6 +601,8 @@ describe('SpoolFormModal weightTouched', () => {
       expect(screen.getByText('Edit Spool')).toBeInTheDocument();
     });
 
+    openColorAndCostTab();
+
     // Wait for catalog to load
     await waitFor(() => {
       expect(api.getSpoolCatalog).toHaveBeenCalled();
@@ -631,7 +655,7 @@ describe('SpoolFormModal Spoolman K-profile support', () => {
     vi.clearAllMocks();
   });
 
-  it('shows PA Profile tab for Spoolman spools in non-quickAdd mode', async () => {
+  it('shows the Printers tab for Spoolman spools in non-quickAdd mode', async () => {
     render(
       <SpoolFormModal
         isOpen={true}
@@ -647,8 +671,8 @@ describe('SpoolFormModal Spoolman K-profile support', () => {
       expect(screen.getByText('Edit Spool')).toBeInTheDocument();
     });
 
-    // PA Profile tab should be visible in Spoolman mode
-    expect(screen.getByText('PA Profile')).toBeInTheDocument();
+    // Printers tab should be visible in Spoolman mode
+    expect(screen.getByText('Printers')).toBeInTheDocument();
   });
 
   it('calls saveSpoolmanKProfiles (not saveSpoolKProfiles) on update in Spoolman mode', async () => {
@@ -680,6 +704,34 @@ describe('SpoolFormModal Spoolman K-profile support', () => {
     });
     expect(api.saveSpoolKProfiles).not.toHaveBeenCalled();
   });
+
+  it('saves the per-model preset overrides alongside the K profiles', async () => {
+    // Both are full replacements and both are written on every save: that is
+    // how the user clears the last profile or the last override. The Spoolman
+    // pair must be the one called in Spoolman mode -- the two inventory modes
+    // have drifted apart on this path before (#1713).
+    render(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        spool={spoolmanSpool}
+        mode="edit"
+        currencySymbol="$"
+        spoolmanMode={true}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Edit Spool')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    await waitFor(() => {
+      expect(api.saveSpoolmanFilamentPresets).toHaveBeenCalledWith(42, []);
+    });
+    expect(api.saveSpoolFilamentPresets).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -702,6 +754,18 @@ vi.mock('../../components/spool-form/SpoolmanFilamentPicker', () => ({
           vendor: { id: 1, name: 'Bambu Lab' },
         })}>
           Select Filament
+        </button>
+        <button data-testid="picker-select-clear-btn" onClick={() => onSelect({
+          id: 8,
+          name: 'PLA Basic Clear',
+          material: 'PLA',
+          color_hex: '00000000',
+          color_name: 'Clear',
+          weight: 1000,
+          spool_weight: 196,
+          vendor: { id: 1, name: 'Bambu Lab' },
+        })}>
+          Select Clear Filament
         </button>
       </div>
     );
@@ -765,6 +829,66 @@ describe('SpoolFormModal — SpoolmanFilamentPicker integration (T2)', () => {
     });
   });
 
+  it('prefills a translucent filament with its own alpha, not 808080FF (#2912)', async () => {
+    // The guard here required exactly 6 hex chars and then appended FF. That was
+    // unreachable while Bambuddy never wrote 8 characters; once a clear filament
+    // is storable, picking it out of the Spoolman catalogue prefilled the form
+    // with neutral grey — the frontend twin of the read-side regex.
+    render(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        currencySymbol="$"
+        spoolmanMode={true}
+        spoolsQueryKey={['spoolman-spools']}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('picker-select-clear-btn')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('picker-select-clear-btn'));
+
+    const saveButton = screen.getByRole('button', { name: /save|add spool/i });
+    fireEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(api.createSpoolmanInventorySpool).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = vi.mocked(api.createSpoolmanInventorySpool).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.rgba).toBe('00000000');
+  });
+
+  it('still appends the opaque alpha to a 6-char catalogue colour', async () => {
+    render(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        currencySymbol="$"
+        spoolmanMode={true}
+        spoolsQueryKey={['spoolman-spools']}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('picker-select-btn')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId('picker-select-btn'));
+
+    const saveButton = screen.getByRole('button', { name: /save|add spool/i });
+    fireEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(api.createSpoolmanInventorySpool).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = vi.mocked(api.createSpoolmanInventorySpool).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.rgba).toBe('FF0000FF');
+  });
+
   it('includes spoolman_filament_id in the submit payload when a filament is pre-selected', async () => {
     render(
       <SpoolFormModal
@@ -816,9 +940,15 @@ describe('SpoolFormModal — SpoolmanFilamentPicker integration (T2)', () => {
       expect(screen.getByTestId('picker-selected-id').textContent).toBe('7');
     });
 
+    openColorAndCostTab();
+
     // Manually edit the color_name field (a linked field)
     const colorNameInput = screen.getByPlaceholderText('Jade White, Fire Red...');
     fireEvent.change(colorNameInput, { target: { value: 'Custom Blue' } });
+
+    // Back to the Filament tab: the catalog picker only renders there, so the
+    // link state has to be read where it lives.
+    fireEvent.click(screen.getByText('Filament Info'));
 
     // spoolman_filament_id must be cleared (picker shows 'none')
     await waitFor(() => {
@@ -933,6 +1063,118 @@ describe('SpoolFormModal — Unassign button (#1336)', () => {
   });
 });
 
+describe('SpoolFormModal — Clear RFID Tag for a tray-UUID-only spool (#3109)', () => {
+  const trayUuidOnly = (overrides: Partial<InventorySpool>): InventorySpool =>
+    ({
+      ...existingSpool,
+      id: 42,
+      tag_uid: null,
+      tray_uuid: 'A1B2C3D4E5F60718293A4B5C6D7E8F90',
+      ...overrides,
+    }) as InventorySpool;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('clears the tag on a Spoolman spool linked only by its tray UUID', async () => {
+    // _map_spoolman_spool splits extra.tag by length: a 32-char value becomes
+    // tray_uuid and tag_uid stays None. That is every Bambu Lab spool synced
+    // from the AMS, and not one of them could have its tag cleared here.
+    render(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        spool={trayUuidOnly({ data_origin: 'spoolman', tag_type: 'spoolman' })}
+        mode="edit"
+        currencySymbol="$"
+        spoolmanMode={true}
+      />
+    );
+
+    const clearBtn = await screen.findByRole('button', { name: /clear rfid tag/i });
+    expect(clearBtn).not.toBeDisabled();
+
+    fireEvent.click(clearBtn);
+
+    await waitFor(() => {
+      expect(api.updateSpoolmanInventorySpool).toHaveBeenCalledWith(
+        42,
+        expect.objectContaining({ tag_uid: null, tray_uuid: null })
+      );
+    });
+    expect(api.updateSpool).not.toHaveBeenCalled();
+  });
+
+  it('clears the tag on a built-in spool linked only by its tray UUID', async () => {
+    // PATCH /inventory/spools/{id}/link-tag takes tray_uuid on its own, so the
+    // built-in inventory reaches the same state without Spoolman involved.
+    render(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        spool={trayUuidOnly({})}
+        mode="edit"
+        currencySymbol="$"
+      />
+    );
+
+    const clearBtn = await screen.findByRole('button', { name: /clear rfid tag/i });
+    expect(clearBtn).not.toBeDisabled();
+
+    fireEvent.click(clearBtn);
+
+    await waitFor(() => {
+      expect(api.updateSpool).toHaveBeenCalledWith(
+        42,
+        expect.objectContaining({ tag_uid: null, tray_uuid: null })
+      );
+    });
+    expect(api.updateSpoolmanInventorySpool).not.toHaveBeenCalled();
+  });
+
+  it('stays disabled for a spool carrying neither identifier', async () => {
+    // The button still has something to gate on -- it is not simply always on.
+    render(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        spool={trayUuidOnly({ tray_uuid: null })}
+        mode="edit"
+        currencySymbol="$"
+      />
+    );
+
+    const clearBtn = await screen.findByRole('button', { name: /clear rfid tag/i });
+    expect(clearBtn).toBeDisabled();
+  });
+
+  it('still clears the tag on a spool carrying a tag_uid', async () => {
+    const clearBtnSpool = trayUuidOnly({ tag_uid: 'DEADBEEF', tray_uuid: null });
+    render(
+      <SpoolFormModal
+        isOpen={true}
+        onClose={vi.fn()}
+        spool={clearBtnSpool}
+        mode="edit"
+        currencySymbol="$"
+      />
+    );
+
+    const clearBtn = await screen.findByRole('button', { name: /clear rfid tag/i });
+    expect(clearBtn).not.toBeDisabled();
+
+    fireEvent.click(clearBtn);
+
+    await waitFor(() => {
+      expect(api.updateSpool).toHaveBeenCalledWith(
+        42,
+        expect.objectContaining({ tag_uid: null, tray_uuid: null })
+      );
+    });
+  });
+});
+
 describe('SpoolFormModal locationIdTouched', () => {
   /**
    * Regression tests for the round-trip bug: saving the edit modal without
@@ -1000,6 +1242,8 @@ describe('SpoolFormModal locationIdTouched', () => {
     await waitFor(() => {
       expect(screen.getByText('Edit Spool')).toBeInTheDocument();
     });
+
+    openColorAndCostTab();
 
     // Change storage location via the catalog dropdown
     const locationSelect = screen.getByLabelText(/storage location/i);
@@ -1268,6 +1512,7 @@ describe('SpoolFormModal code fields', () => {
     await waitFor(() => {
       expect(screen.getByText('Edit Spool')).toBeInTheDocument();
     });
+    openColorAndCostTab();
 
     expect(screen.getByDisplayValue('6938936716785')).toBeInTheDocument();
     expect(screen.getByDisplayValue('17600')).toBeInTheDocument();
@@ -1287,6 +1532,7 @@ describe('SpoolFormModal code fields', () => {
     await waitFor(() => {
       expect(screen.getByText('Edit Spool')).toBeInTheDocument();
     });
+    openColorAndCostTab();
     expect(screen.getByText('Refill pack')).toBeInTheDocument();
 
     rerender(

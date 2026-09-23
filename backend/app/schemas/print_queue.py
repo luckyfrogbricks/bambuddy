@@ -187,7 +187,7 @@ class PrintQueueItemResponse(BaseModel):
     target_location: str | None = None  # Target location filter for model-based assignment
     required_filament_types: list[str] | None = None  # Required filament types for model-based assignment
     filament_overrides: list[dict] | None = None  # Filament overrides for model-based assignment
-    waiting_reason: str | None = None  # Why a model-based job hasn't started yet
+    waiting_reason: str | None = None  # Why this job hasn't started yet (empty once it can)
     archive_id: int | None  # None if library_file_id is set (archive created at print start)
     library_file_id: int | None  # For queue items from library files
     cost_center_id: int | None = None
@@ -444,6 +444,9 @@ class PrintBatchPlateProgress(BaseModel):
     estimated_remaining_cost: float | None = None
     filament_used_grams: float | None = None
     print_time_seconds: int = 0
+    # False when this plate owes runs but has no queue item left to clone
+    # their configuration from, so offering to queue it would only fail.
+    can_dispatch: bool = False
 
 
 class PrintBatchResponse(BaseModel):
@@ -475,6 +478,9 @@ class PrintBatchResponse(BaseModel):
     has_targets: bool = False
     target_count: int = 0
     remaining_count: int = 0
+    # Of ``remaining_count``, how many runs can actually be queued. Lower when
+    # a plate's last queue item was deleted (#2960).
+    dispatchable_count: int = 0
     actual_cost: float | None = None
     estimated_remaining_cost: float | None = None
     filament_used_grams: float | None = None
