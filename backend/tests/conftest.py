@@ -169,7 +169,7 @@ def reset_auth_enabled_cache():
 
 @pytest.fixture(autouse=True)
 def disconnect_printers_registered_during_a_test():
-    """Hand the ``printer_manager`` singleton back the way the test found it.
+    """Give every test an empty ``printer_manager`` singleton.
 
     ``POST /api/v1/printers`` really calls ``connect_printer``, so a test that
     creates a printer through the API parks a live client in the singleton --
@@ -179,16 +179,18 @@ def disconnect_printers_registered_during_a_test():
     ``test_scheduled_drying_routes`` saw exactly that: an "online" printer with
     no firmware version, so scheduling a dry came back 400 instead of 200.
 
-    Only ids this test added are dropped, so a client registered by a wider
-    fixture stays registered. ``disconnect_printer`` is what clears the model
-    and printer-info caches too, and it stops the paho thread the leaked client
-    would otherwise keep retrying on for the rest of the run.
+    Snapshotting the ids at test entry was insufficient: a client leaked by a
+    previous module became part of that snapshot and therefore survived every
+    later cleanup on the same xdist worker. Clear both before and after each
+    test. ``disconnect_printer`` also clears model/printer-info caches and stops
+    any paho thread owned by the leaked client.
     """
     from backend.app.services.printer_manager import printer_manager
 
-    before = set(printer_manager._clients)
+    for printer_id in list(printer_manager._clients):
+        printer_manager.disconnect_printer(printer_id)
     yield
-    for printer_id in set(printer_manager._clients) - before:
+    for printer_id in list(printer_manager._clients):
         printer_manager.disconnect_printer(printer_id)
 
 
@@ -242,6 +244,7 @@ async def test_engine():
         spool,
         spool_assignment,
         spool_catalog,
+        spool_filament_preset,
         spool_k_profile,
         spool_usage_history,
         spoolbuddy_device,
@@ -584,6 +587,32 @@ def printer_factory(db_session):
         return printer
 
     return _create_printer
+
+
+@pytest.fixture
+def location_factory(db_session):
+    _counter = [0]
+
+    async def _create_location(**kwargs):
+        from backend.app.models.location import Location
+
+        _counter[0] += 1
+        counter = _counter[0]
+
+        name = kwargs.pop("name", f"Test Location {counter}")
+        defaults = {
+            "name": name,
+            "name_key": name.strip().lower(),
+        }
+        defaults.update(kwargs)
+
+        location = Location(**defaults)
+        db_session.add(location)
+        await db_session.commit()
+        await db_session.refresh(location)
+        return location
+
+    return _create_location
 
 
 @pytest.fixture

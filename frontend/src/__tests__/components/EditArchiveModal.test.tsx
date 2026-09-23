@@ -252,6 +252,62 @@ describe('EditArchiveModal', () => {
         expect(patched?.failure_reason).toBe('cloggedNozzle');
       });
     });
+
+    // A value outside the vocabulary used to initialise the dropdown to '',
+    // and saving from that state wrote the empty selection over the stored
+    // text -- opening the editor and pressing Save destroyed the
+    // classification. The startup migration folds every known spelling onto a
+    // key, so what reaches here is genuinely unrecognisable text; it has to
+    // survive rather than be silently discarded (issue #2974).
+    const freeTextArchive = {
+      ...mockArchive,
+      status: 'failed',
+      failure_reason: 'Custom legacy reason',
+    };
+
+    it('keeps a stored value it cannot map, as its own option', () => {
+      render(<EditArchiveModal archive={freeTextArchive} onClose={mockOnClose} onSave={mockOnSave} />);
+      const select = screen.getByLabelText(/failure reason/i) as HTMLSelectElement;
+      expect(select.value).toBe('Custom legacy reason');
+      expect(
+        screen.getByRole('option', { name: 'Custom legacy reason' }),
+      ).toBeInTheDocument();
+    });
+
+    it('does not clear an unmappable reason on an untouched save', async () => {
+      const user = userEvent.setup();
+      let patched: { failure_reason?: string } | undefined;
+      server.use(
+        http.patch('/api/v1/archives/:id', async ({ request }) => {
+          patched = (await request.json()) as { failure_reason?: string };
+          return HttpResponse.json({ ...freeTextArchive, ...patched });
+        }),
+      );
+
+      render(<EditArchiveModal archive={freeTextArchive} onClose={mockOnClose} onSave={mockOnSave} />);
+      await user.click(screen.getByRole('button', { name: /save/i }));
+
+      await waitFor(() => {
+        expect(patched?.failure_reason).toBe('Custom legacy reason');
+      });
+    });
+
+    it('offers the stale-path reason the backend now writes', () => {
+      // Both stale writers in main.py store `noStatusUpdate`. If it were
+      // missing from the dropdown the editor would treat it as unmappable and
+      // show the raw key to the user instead of a translated label.
+      const staleArchive = {
+        ...mockArchive,
+        status: 'failed',
+        failure_reason: 'noStatusUpdate',
+      };
+      render(<EditArchiveModal archive={staleArchive} onClose={mockOnClose} onSave={mockOnSave} />);
+      const select = screen.getByLabelText(/failure reason/i) as HTMLSelectElement;
+      expect(select.value).toBe('noStatusUpdate');
+      expect(
+        screen.getByRole('option', { name: 'No status update received' }),
+      ).toBeInTheDocument();
+    });
   });
 
   describe('filament grams (#1820)', () => {
@@ -385,6 +441,83 @@ describe('EditArchiveModal', () => {
       await waitFor(() => {
         expect(seen.body?.filament_used_grams).toBeNull();
       });
+    });
+  });
+  describe('project picker (#2888)', () => {
+    // Statuses matter here, so this describe brings its own list rather than
+    // the bare one the rest of the file shares.
+    const withStatuses = (rows: Array<Record<string, unknown>>) =>
+      server.use(http.get('/api/v1/projects/', () => HttpResponse.json(rows)));
+
+    function savedBody() {
+      const seen: { body?: Record<string, unknown> } = {};
+      server.use(
+        http.patch('/api/v1/archives/:id', async ({ request }) => {
+          seen.body = (await request.json()) as Record<string, unknown>;
+          return HttpResponse.json({ ...mockArchive, ...seen.body });
+        }),
+      );
+      return seen;
+    }
+
+    it('leaves archived projects out of the list', async () => {
+      withStatuses([
+        { id: 1, name: 'Live Work', color: '#00ae42', status: 'active' },
+        { id: 2, name: 'Last Year', color: '#888888', status: 'archived' },
+      ]);
+
+      render(<EditArchiveModal archive={mockArchive} onClose={mockOnClose} onSave={mockOnSave} />);
+
+      await screen.findByRole('option', { name: 'Live Work' });
+      expect(screen.queryByRole('option', { name: 'Last Year' })).not.toBeInTheDocument();
+    });
+
+    it('keeps completed projects, which are still worth filing a reprint under', async () => {
+      withStatuses([
+        { id: 1, name: 'Live Work', color: '#00ae42', status: 'active' },
+        { id: 3, name: 'Shipped', color: '#888888', status: 'completed' },
+      ]);
+
+      render(<EditArchiveModal archive={mockArchive} onClose={mockOnClose} onSave={mockOnSave} />);
+
+      expect(await screen.findByRole('option', { name: 'Shipped' })).toBeInTheDocument();
+    });
+
+    it('still offers the archived project this archive is already in', async () => {
+      // Filtered out, the select holds a value no option matches, and the
+      // browser resets it to the first option -- "No project". The archive
+      // would say it is filed nowhere while sitting in a project.
+      withStatuses([
+        { id: 1, name: 'Live Work', color: '#00ae42', status: 'active' },
+        { id: 2, name: 'Last Year', color: '#888888', status: 'archived' },
+      ]);
+      const filed = { ...mockArchive, project_id: 2 };
+
+      render(<EditArchiveModal archive={filed} onClose={mockOnClose} onSave={mockOnSave} />);
+
+      const option = await screen.findByRole('option', { name: 'Last Year' });
+      expect((option as HTMLOptionElement).selected).toBe(true);
+    });
+
+    it('saves the project it was already in when nothing else is touched', async () => {
+      const user = userEvent.setup();
+      const seen = savedBody();
+      withStatuses([{ id: 2, name: 'Last Year', color: '#888888', status: 'archived' }]);
+
+      render(
+        <EditArchiveModal
+          archive={{ ...mockArchive, project_id: 2 }}
+          onClose={mockOnClose}
+          onSave={mockOnSave}
+        />,
+      );
+      await screen.findByRole('option', { name: 'Last Year' });
+      await user.click(screen.getByRole('button', { name: /save/i }));
+
+      // The stored id survives the round trip untouched: showing the archived
+      // project is what makes the field honest, and it must not also change
+      // what an untouched save writes.
+      await waitFor(() => expect(seen.body?.project_id).toBe(2));
     });
   });
 });

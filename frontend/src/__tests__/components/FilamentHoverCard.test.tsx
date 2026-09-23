@@ -205,6 +205,7 @@ describe('FilamentHoverCard', () => {
             assignedSpool: {
               id: 1,
               material: 'PLA',
+              subtype: null,
               brand: 'Devil Design',
               color_name: 'Black',
             },
@@ -280,6 +281,7 @@ describe('FilamentHoverCard', () => {
     const inventorySpool = {
       id: 42,
       material: 'PLA',
+      subtype: null,
       brand: 'eSun',
       color_name: 'Black',
     };
@@ -420,7 +422,7 @@ describe('FilamentHoverCard', () => {
         <FilamentHoverCard
           data={baseFilamentData}
           inventory={{
-            assignedSpool: { id: 7, material: 'PLA', brand: 'eSun', color_name: 'Black' },
+            assignedSpool: { id: 7, material: 'PLA', subtype: null, brand: 'eSun', color_name: 'Black' },
             onUnassignSpool,
           }}
         >
@@ -607,7 +609,7 @@ describe('FilamentHoverCard colour name (#2875)', () => {
         data={{ ...whiteMatte, colorName: 'Jade White' }}
         inventory={{
           isAssigned: true,
-          assignedSpool: { id: 17, material: 'PLA', brand: 'Bambu Lab', color_name: 'Matte Ivory White' },
+          assignedSpool: { id: 17, material: 'PLA', subtype: null, brand: 'Bambu Lab', color_name: 'Matte Ivory White' },
         }}
       >
         <div>trigger</div>
@@ -626,7 +628,7 @@ describe('FilamentHoverCard colour name (#2875)', () => {
         data={whiteMatte}
         inventory={{
           isAssigned: true,
-          assignedSpool: { id: 17, material: 'PLA', brand: 'Bambu Lab', color_name: 'A06-D0' },
+          assignedSpool: { id: 17, material: 'PLA', subtype: null, brand: 'Bambu Lab', color_name: 'A06-D0' },
         }}
       >
         <div>trigger</div>
@@ -646,7 +648,7 @@ describe('FilamentHoverCard colour name (#2875)', () => {
         data={whiteMatte}
         inventory={{
           isAssigned: true,
-          assignedSpool: { id: 17, material: 'PLA', brand: 'Bambu Lab', color_name: colorName },
+          assignedSpool: { id: 17, material: 'PLA', subtype: null, brand: 'Bambu Lab', color_name: colorName },
         }}
       >
         <div>trigger</div>
@@ -664,7 +666,7 @@ describe('FilamentHoverCard colour name (#2875)', () => {
         data={whiteMatte}
         inventory={{
           isAssigned: true,
-          assignedSpool: { id: 17, material: 'PLA', brand: 'Bambu Lab', color_name: null },
+          assignedSpool: { id: 17, material: 'PLA', subtype: null, brand: 'Bambu Lab', color_name: null },
         }}
       >
         <div>trigger</div>
@@ -672,5 +674,211 @@ describe('FilamentHoverCard colour name (#2875)', () => {
     );
 
     await waitFor(() => expect(screen.getByText('Ivory White')).toBeInTheDocument());
+  });
+});
+
+// A spool's subtype is part of its name. Dropping it made a wood-filled roll
+// read as plain PLA on the slot card, which is the display-side version of
+// the mistake #2902 fixed on the backend -- and the printer, the inventory
+// page and Studio all named it correctly at the same time, so the card was
+// the only thing saying otherwise.
+describe('FilamentHoverCard assigned spool name', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    __resetColorCatalogForTests();
+  });
+
+  function showAssigned(assignedSpool: {
+    id: number;
+    material: string;
+    subtype: string | null;
+    brand: string | null;
+    color_name: string | null;
+  }) {
+    renderWithHover(
+      <FilamentHoverCard data={baseFilamentData} inventory={{ isAssigned: true, assignedSpool }}>
+        <div>trigger</div>
+      </FilamentHoverCard>
+    );
+    vi.advanceTimersByTime(100);
+  }
+
+  it('names a filled filament by its subtype, not by its base material', async () => {
+    showAssigned({
+      id: 77,
+      material: 'PLA',
+      subtype: 'Wood',
+      brand: 'Bambu Lab',
+      color_name: 'Classic Birch',
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText('Bambu Lab PLA Wood - Classic Birch')).toBeInTheDocument()
+    );
+  });
+
+  it('omits the subtype entirely for a spool that has none', async () => {
+    showAssigned({
+      id: 78,
+      material: 'PLA',
+      subtype: null,
+      brand: 'Bambu Lab',
+      color_name: 'Jade White',
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText('Bambu Lab PLA - Jade White')).toBeInTheDocument()
+    );
+  });
+});
+
+/**
+ * The header swatch (#2967).
+ *
+ * A tray record carries one `tray_color` hex and nothing else, so telemetry can
+ * never describe a gradient or a surface effect. The reporter's Ziro "Colorful
+ * Mist" -- yellow, cyan and pink, effect Tri Color -- painted the header as one
+ * flat band of the single hex the slot happened to be configured with. The
+ * spool knows better, and the header now paints the spool's own swatch through
+ * the same builder the Inventory swatches use.
+ */
+describe('FilamentHoverCard — assigned spool swatch (#2967)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  const triColorSpool = {
+    id: 191,
+    material: 'PLA',
+    subtype: 'Matte',
+    brand: 'Ziro',
+    color_name: 'Colorful Mist',
+    rgba: 'FFB6C1FF',
+    extra_colors: 'ffff00,00ffff,ffb6c1',
+    effect_type: 'tri-color',
+  };
+
+  // The swatch header is the card's first child: a fixed-height block carrying
+  // the colour and the name. Queried off `document` rather than the render
+  // container because the card is portaled into document.body.
+  function header(): HTMLElement {
+    const el = document.querySelector('.h-12') as HTMLElement | null;
+    expect(el, 'header block not found').not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  it('paints the gradient for a multi-colour spool', async () => {
+    renderWithHover(
+      <FilamentHoverCard data={baseFilamentData} inventory={{ assignedSpool: triColorSpool }}>
+        <div>trigger</div>
+      </FilamentHoverCard>
+    );
+    vi.advanceTimersByTime(100);
+    await waitFor(() => expect(screen.getByText('Colorful Mist')).toBeInTheDocument());
+    expect(header().style.backgroundImage).toContain('gradient');
+  });
+
+  it('carries every stop the spool declared', async () => {
+    renderWithHover(
+      <FilamentHoverCard data={baseFilamentData} inventory={{ assignedSpool: triColorSpool }}>
+        <div>trigger</div>
+      </FilamentHoverCard>
+    );
+    vi.advanceTimersByTime(100);
+    await waitFor(() => expect(screen.getByText('Colorful Mist')).toBeInTheDocument());
+    const image = header().style.backgroundImage.toLowerCase();
+    expect(image).toContain('#ffff00');
+    expect(image).toContain('#00ffff');
+    expect(image).toContain('#ffb6c1');
+  });
+
+  it('leaves a plain single-colour spool on the flat slot colour', async () => {
+    // The common case must not go anywhere near the gradient machinery.
+    renderWithHover(
+      <FilamentHoverCard
+        data={baseFilamentData}
+        inventory={{
+          assignedSpool: { ...triColorSpool, extra_colors: null, effect_type: null },
+        }}
+      >
+        <div>trigger</div>
+      </FilamentHoverCard>
+    );
+    vi.advanceTimersByTime(100);
+    await waitFor(() => expect(screen.getByText('Colorful Mist')).toBeInTheDocument());
+    expect(header().style.backgroundImage).toBe('');
+  });
+
+  it('paints the swatch for an effect with no extra colours', async () => {
+    // A silk roll is one colour with a surface the hex cannot express.
+    renderWithHover(
+      <FilamentHoverCard
+        data={baseFilamentData}
+        inventory={{ assignedSpool: { ...triColorSpool, extra_colors: null, effect_type: 'silk' } }}
+      >
+        <div>trigger</div>
+      </FilamentHoverCard>
+    );
+    vi.advanceTimersByTime(100);
+    await waitFor(() => expect(screen.getByText('Colorful Mist')).toBeInTheDocument());
+    expect(header().style.backgroundImage).not.toBe('');
+  });
+
+  it('puts the name on a scrim when the background has several bands', async () => {
+    // One hex cannot decide legibility across yellow, cyan and pink, and the
+    // label sits dead centre where the background is most likely to change.
+    renderWithHover(
+      <FilamentHoverCard data={baseFilamentData} inventory={{ assignedSpool: triColorSpool }}>
+        <div>trigger</div>
+      </FilamentHoverCard>
+    );
+    vi.advanceTimersByTime(100);
+    await waitFor(() => expect(screen.getByText('Colorful Mist')).toBeInTheDocument());
+    expect(screen.getByText('Colorful Mist').className).toContain('bg-black/60');
+  });
+
+  it('does not scrim a single-colour spool', async () => {
+    renderWithHover(
+      <FilamentHoverCard
+        data={baseFilamentData}
+        inventory={{
+          assignedSpool: { ...triColorSpool, extra_colors: null, effect_type: null },
+        }}
+      >
+        <div>trigger</div>
+      </FilamentHoverCard>
+    );
+    vi.advanceTimersByTime(100);
+    await waitFor(() => expect(screen.getByText('Colorful Mist')).toBeInTheDocument());
+    expect(screen.getByText('Colorful Mist').className).not.toContain('bg-black/60');
+  });
+
+  it('keeps a slot with no assigned spool exactly as it was', async () => {
+    renderWithHover(
+      <FilamentHoverCard data={baseFilamentData} inventory={{ assignedSpool: null }}>
+        <div>trigger</div>
+      </FilamentHoverCard>
+    );
+    vi.advanceTimersByTime(100);
+    await waitFor(() => expect(screen.getByText('Red')).toBeInTheDocument());
+    expect(header().style.backgroundImage).toBe('');
+  });
+
+  it('tolerates a spool that predates the swatch fields', async () => {
+    // Older callers send neither rgba nor extra_colors; the optional fields
+    // must not turn that into a blank or a crash.
+    renderWithHover(
+      <FilamentHoverCard
+        data={baseFilamentData}
+        inventory={{
+          assignedSpool: { id: 1, material: 'PLA', subtype: null, brand: 'Ziro', color_name: 'Mist' },
+        }}
+      >
+        <div>trigger</div>
+      </FilamentHoverCard>
+    );
+    vi.advanceTimersByTime(100);
+    await waitFor(() => expect(screen.getByText('Mist')).toBeInTheDocument());
+    expect(header().style.backgroundImage).toBe('');
   });
 });

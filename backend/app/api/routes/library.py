@@ -65,6 +65,7 @@ from backend.app.schemas.library import (
 from backend.app.schemas.slicer import SliceRequest, SliceResponse
 from backend.app.services.archive import ThreeMFParser
 from backend.app.services.design_settings import (
+    DesignOverride,
     apply_design_overrides,
     extract_design_process_overrides,
     overrides_from_config,
@@ -72,7 +73,12 @@ from backend.app.services.design_settings import (
 from backend.app.services.filament_requirements import annotate_rack_groups
 from backend.app.services.plate_thumbnail import inject_plate_thumbnails_if_missing
 from backend.app.services.process_overrides import apply_process_overrides
-from backend.app.services.slice_output_check import missing_start_gcode_message, start_gcode_is_missing
+from backend.app.services.slice_output_check import (
+    missing_start_gcode_message,
+    start_gcode_is_missing,
+    unresolved_filament_message,
+    unresolved_filament_slots,
+)
 from backend.app.services.stl_thumbnail import MIN_USABLE_STL_BYTES, generate_stl_thumbnail
 from backend.app.utils.filename import (
     MAX_FILENAME_BYTES,
@@ -82,6 +88,7 @@ from backend.app.utils.filename import (
 )
 from backend.app.utils.safe_path import PathTraversalError, assert_under, safe_join_under
 from backend.app.utils.threemf_tools import (
+    carries_gcode,
     default_plate_gcode_name,
     expand_to_project_slots,
     extract_embedded_presets_from_3mf,
@@ -140,7 +147,7 @@ def get_library_files_dir() -> Path:
     return files_dir
 
 
-def classify_file_type(filename: str) -> str:
+def classify_file_type(filename: str, file_path: Path | str | None = None) -> str:
     """Return the canonical ``LibraryFile.file_type`` for *filename*.
 
     Compound extensions are preserved — a `.gcode.3mf` file (a sliced
@@ -152,12 +159,23 @@ def classify_file_type(filename: str) -> str:
     downstream gates (gcode download, file-type filter, thumbnail
     extraction) only need to handle one canonical name per file family.
     Files with no extension classify as ``unknown``.
+
+    Pass ``file_path`` and a ``.3mf`` is judged on what the zip actually holds
+    rather than on its name (#2993). The name is not evidence: a plate exported
+    from Studio or a print dispatched through the cloud reaches the archive as
+    ``Foo.3mf``, G-code and all, and downloading that and re-importing it used
+    to land a fully printable file in the library as a source-only project. The
+    file is not opened when the name already settles it, so the common case
+    still costs nothing.
     """
     lower = filename.lower()
     if lower.endswith(".gcode.3mf"):
         return "gcode.3mf"
     ext = os.path.splitext(lower)[1]
-    return ext[1:] if ext else "unknown"
+    file_type = ext[1:] if ext else "unknown"
+    if file_type == "3mf" and file_path is not None and carries_gcode(file_path):
+        return "gcode.3mf"
+    return file_type
 
 
 def get_library_thumbnails_dir() -> Path:
@@ -652,7 +670,7 @@ async def save_3mf_bytes_to_library(
         is_external=is_external,
         filename=filename,
         file_path=_stored_file_path(file_path, is_external),
-        file_type=classify_file_type(filename),
+        file_type=classify_file_type(filename, file_path),
         file_size=len(file_bytes),
         file_hash=file_hash,
         thumbnail_path=to_relative_path(thumbnail_path) if thumbnail_path else None,
@@ -1883,7 +1901,10 @@ async def scan_external_folder(
             except OSError:
                 continue
 
-            file_type = classify_file_type(filename)
+            # The zip is opened for the thumbnail immediately below either way,
+            # so judging a `.3mf` on its contents rather than its name (#2993)
+            # costs this scan nothing.
+            file_type = classify_file_type(filename, filepath)
 
             # Extract thumbnail for 3mf files (including .gcode.3mf sliced
             # outputs — those are 3MF zips on disk and carry the same
@@ -2228,12 +2249,12 @@ async def upload_file(
             validate_print_filename(filename)
         except InvalidFilenameError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        ext = os.path.splitext(filename)[1].lower()
-        # `file_type` is compound-aware (`gcode.3mf` for sliced outputs).
-        # `ext` stays the trailing extension because the on-disk filename
-        # uses it directly and the 3MF-parse branch below still gates on
+        # `ext` stays the trailing extension because the on-disk filename uses
+        # it directly and the 3MF-parse branch below still gates on
         # `ext == ".3mf"`, which is correct for both `.3mf` and `.gcode.3mf`.
-        file_type = classify_file_type(filename)
+        # `file_type` is compound-aware and is decided further down, once the
+        # bytes are on disk to be read.
+        ext = os.path.splitext(filename)[1].lower()
 
         # Verify folder exists if specified
         target_folder = None
@@ -2260,6 +2281,10 @@ async def upload_file(
         # Save file
         with open(file_path, "wb") as f:
             f.write(content)
+
+        # Now that the bytes are on disk the zip can settle what the name only
+        # guessed at: a sliced 3MF uploaded as `Foo.3mf` is a sliced 3MF (#2993).
+        file_type = classify_file_type(filename, file_path)
 
         # Calculate hash
         file_hash = calculate_file_hash(file_path)
@@ -2527,7 +2552,6 @@ async def extract_zip_file(
                     # Extract file
                     filename = os.path.basename(zip_path)
                     ext = os.path.splitext(filename)[1].lower()
-                    file_type = classify_file_type(filename)
 
                     # Generate unique filename for storage
                     unique_filename = f"{uuid.uuid4().hex}{ext}"
@@ -2539,6 +2563,11 @@ async def extract_zip_file(
                     file_content = zf.read(zip_path)
                     with open(file_path, "wb") as f:
                         f.write(file_content)
+
+                    # Classified once the bytes are on disk so a sliced 3MF
+                    # named `Foo.3mf` inside the zip is recognised as sliced
+                    # (#2993) rather than trusted to say so in its name.
+                    file_type = classify_file_type(filename, file_path)
 
                     # Calculate hash
                     file_hash = calculate_file_hash(file_path)
@@ -3616,6 +3645,101 @@ def _patch_process_bed_type(process_json: str, bed_type: str) -> str:
     return json.dumps(profile)
 
 
+def _source_plate_colours(model_bytes: bytes) -> list[str]:
+    """Per-slot colours the source 3MF was designed with, or ``[]``.
+
+    Read from ``project_settings.config`` rather than ``slice_info.config``:
+    the latter records the colour the file was *last sliced* with, which for a
+    source that never carried one is the slicer's own #00AE42 default — the
+    exact value #2977 is about, so using it as a fallback would be circular.
+    STL and mesh-only 3MF sources have no project settings and yield ``[]``.
+    """
+    from io import BytesIO
+
+    try:
+        with zipfile.ZipFile(BytesIO(model_bytes), "r") as zf:
+            return [str(f.get("color") or "") for f in extract_project_filaments_from_3mf(zf)]
+    except (zipfile.BadZipFile, OSError, ValueError):
+        return []
+
+
+def _preset_default_colour(profile: dict) -> str:
+    """A filament preset's own ``default_filament_colour``, or ``""``.
+
+    OrcaSlicer's third-party vendor profiles carry this; Bambu Studio's
+    bundled BBL filament profiles carry it nowhere (checked across the whole
+    shipped `resources/profiles/BBL/filament/` tree — zero occurrences), which
+    is why it can only ever be one link in the chain and never the whole fix.
+
+    It is read here and rewritten as ``filament_colour`` because the CLI does
+    not read it itself. Measured against a 02.08.02.61 sidecar: a profile
+    carrying only ``default_filament_colour: ["#FF00FF"]`` still slices to
+    ``filament_colour: ["#00AE42"]``. Bambu Studio consumes the default in the
+    GUI when a project is created, not in ``--load-filaments``.
+    """
+    raw = profile.get("default_filament_colour")
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+def _patch_filament_colours(
+    filament_jsons: list[str],
+    requested: list[str],
+    model_bytes: bytes,
+) -> list[str]:
+    """Write ``filament_colour`` onto each resolved filament profile (#2977).
+
+    Neither slicer stores a colour on a filament *preset* — it is a per-project
+    property their GUIs set from the plate — so a CLI slice with no colour
+    supplied records Bambu Studio's compiled-in default for every slot. That
+    default is `#00AE42`, which is why every internal-slicer output was green
+    regardless of the filament picked, and why the print dialog's AMS mapping
+    reported a colour mismatch against whatever was actually loaded.
+
+    Per slot, first non-empty of:
+
+    1. the caller's explicit colour (the SliceModal's per-slot swatch),
+    2. the preset's own ``default_filament_colour``,
+    3. the colour the source 3MF's plate was designed with.
+
+    All three empty means the slot is left untouched rather than being given a
+    guess: the slicer's default is then still wrong, but it is at least the
+    same wrong value the file would have had before this function existed.
+
+    Returns a new list; a profile that isn't parseable JSON is passed through
+    unchanged, on the same reasoning as ``_patch_process_bed_type`` — a colour
+    is not worth failing a slice that would otherwise succeed.
+    """
+    source_colours = _source_plate_colours(model_bytes) if filament_jsons else []
+    patched: list[str] = []
+    for i, raw in enumerate(filament_jsons):
+        try:
+            profile = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("Filament colour skipped for slot %d: profile is not valid JSON", i + 1)
+            patched.append(raw)
+            continue
+        if not isinstance(profile, dict):
+            patched.append(raw)
+            continue
+        colour = (
+            (requested[i].strip() if i < len(requested) and requested[i] else "")
+            or _preset_default_colour(profile)
+            or (source_colours[i].strip() if i < len(source_colours) and source_colours[i] else "")
+        )
+        if not colour:
+            patched.append(raw)
+            continue
+        # One-element array: the same shape the CLI uses for every other
+        # per-filament field (`filament_type`, `filament_vendor`), and the
+        # shape a `--load-filaments` profile is parsed as. A bare string is
+        # accepted by the JSON parser but not by the config deserialiser.
+        profile["filament_colour"] = [colour]
+        patched.append(json.dumps(profile))
+    return patched
+
+
 # Support-related keys we lift from the source 3MF's project_settings.config
 # into the picked process preset before `--load-settings` sees it (#1881).
 # BambuStudio's shipped process presets ("0.20mm Standard @BBL H2D" etc.)
@@ -3632,7 +3756,31 @@ _SOURCE_PROCESS_SUPPORT_KEYS_TO_PRESERVE = (
 )
 
 
-def _patch_process_support_settings(process_json: str, source_3mf_bytes: bytes) -> str:
+def _declined_source_keys(offered: list[DesignOverride], requested: list[str] | None) -> set[str]:
+    """Settings the file offered and the caller left unticked (#2942).
+
+    The slice dialog lists what the designer changed and applies only the keys
+    that are switched on, so the answer to "which of these does this slice
+    want" is already in the request. This reads the other half of it — the
+    ones that were on offer and turned down — which the support carry-over
+    below must not put back.
+
+    ``requested`` of ``None`` is a caller that predates the per-key choice and
+    so cannot have declined anything; an empty list is one that was shown the
+    file's settings and took none. Collapsing those two into "nothing
+    selected" is what made an empty panel indistinguishable from an old
+    client, and only one of them means the user said no.
+    """
+    if requested is None:
+        return set()
+    return {override.key for override in offered} - set(requested)
+
+
+def _patch_process_support_settings(
+    process_json: str,
+    source_3mf_bytes: bytes,
+    declined: set[str] | frozenset[str] = frozenset(),
+) -> str:
     """Overlay the source 3MF's support configuration onto the process JSON.
 
     The carry is deliberately one-way: a source can switch supports *on*,
@@ -3644,6 +3792,13 @@ def _patch_process_support_settings(process_json: str, source_3mf_bytes: bytes) 
     Nothing is lost by not carrying the off direction: a process preset
     with supports *on* is by definition a deliberate user preset, since
     Bambu's shipped ones all ship them off.
+
+    ``declined`` names keys the caller offered the user as the file's own
+    (#2622) and that the user left unticked, which this carry must then not
+    reinstate behind their back (#2942). It is empty for a source that offers
+    nothing — an OrcaSlicer export carries no ``different_settings_to_system``,
+    so there is nothing to tick and #1881's blanket carry still applies — and
+    for a client that predates the per-key ticks.
 
     Only fires on 3MF sources — STL / STEP don't carry `project_settings.
     config`. Silently no-ops when the source doesn't have the config, has
@@ -3672,7 +3827,11 @@ def _patch_process_support_settings(process_json: str, source_3mf_bytes: bytes) 
     if not isinstance(process_cfg, dict):
         return process_json
 
-    carried = {key: src_cfg[key] for key in _SOURCE_PROCESS_SUPPORT_KEYS_TO_PRESERVE if key in src_cfg}
+    carried = {
+        key: src_cfg[key] for key in _SOURCE_PROCESS_SUPPORT_KEYS_TO_PRESERVE if key in src_cfg and key not in declined
+    }
+    if not carried:
+        return process_json
     process_cfg.update(carried)
     # Logged because this is the one layer of the process JSON the user
     # can't see coming: the slice modal shows the picked preset's values,
@@ -3807,6 +3966,11 @@ async def _run_slicer_with_fallback(
         assert ref is not None, "schema validator guarantees filament list is non-None"
         filament_jsons.append(await resolve_preset_ref(db, user, ref, "filament"))
 
+    # Give every slot a colour before anything else touches the list, so the
+    # unused-slot substitution below propagates a complete profile rather than
+    # one that still has to be patched afterwards (#2977).
+    filament_jsons = _patch_filament_colours(filament_jsons, request.filament_colours, model_bytes)
+
     # Bed-type override (#1337): patch curr_bed_type onto the resolved
     # process JSON so the slicer's StaticPrintConfig pass picks up the
     # user's pick instead of whatever the process preset defaults to.
@@ -3860,18 +4024,29 @@ async def _run_slicer_with_fallback(
         # didn't touch) still drive the slice.
         primary_bytes = _sanitize_project_settings_sentinels(primary_bytes)
 
+        # #2622: the process settings the file's designer moved off the stock
+        # preset. Read once — the support patch below needs to know which of
+        # them the user was shown, and the carry after it needs their values.
+        design_offered = extract_design_process_overrides(primary_bytes)
+
+        declined_from_file = _declined_source_keys(design_offered, request.design_overrides)
+
         # #1881: preserve the source 3MF's support configuration on top of
         # the picked process preset. Bambu's shipped process presets set
         # `enable_support: 0` by default (supports are a per-print, not
         # per-quality, decision); `--load-settings` is authoritative so
         # without patching, the source's `enable_support: 1` + support-slot
         # assignments get discarded and the slice comes out single-material
-        # with a PVA slot loaded but never used.
-        presets["process"] = _patch_process_support_settings(presets["process"], primary_bytes)
+        # with a PVA slot loaded but never used. Bounded by the ticks: this
+        # runs for a source that offers no per-key choice at all, and for the
+        # keys of one that does but whose ticks the user left on.
+        presets["process"] = _patch_process_support_settings(
+            presets["process"], primary_bytes, declined=declined_from_file
+        )
 
-        # #2622: carry the designer's own process tweaks onto the picked preset.
-        # BambuStudio records exactly which keys deviate from the system preset
-        # in `different_settings_to_system`, so a MakerWorld author's 5 walls /
+        # Carry the designer's tweaks onto the picked preset. BambuStudio
+        # records exactly which keys deviate from the system preset in
+        # `different_settings_to_system`, so a MakerWorld author's 5 walls /
         # 100% infill / 0.1mm first layer survive a re-slice for another printer
         # instead of being flattened by --load-settings. Opt-in per key: only the
         # keys the caller names are applied, and only if the source really lists
@@ -3880,7 +4055,7 @@ async def _run_slicer_with_fallback(
         if request.design_overrides:
             presets["process"] = apply_design_overrides(
                 presets["process"],
-                extract_design_process_overrides(primary_bytes),
+                design_offered,
                 request.design_overrides,
             )
 
@@ -4230,6 +4405,21 @@ async def _run_slicer_with_fallback(
             "3mf" if request.export_3mf else "gcode",
         )
         raise HTTPException(status_code=502, detail=missing_start_gcode_message(request.printer_preset.id))
+
+    # Found while investigating #2977: a filament preset the sidecar's bundle
+    # cannot resolve is not an error there — the CLI inherits nothing and
+    # slices with its own defaults, so a PETG pick comes back as PLA at 200 C.
+    # Warned rather than refused: the file prints, and the user may well have
+    # meant to slice with a profile their sidecar image predates. Skipped on
+    # the embedded-settings path, which sends no filament profiles for the
+    # bundle to resolve in the first place.
+    if not used_embedded_settings:
+        unresolved = unresolved_filament_slots(result.content, export_3mf=bool(request.export_3mf))
+        if unresolved:
+            logger.warning(
+                "%s",
+                unresolved_filament_message(unresolved, [ref.id for ref in request.filament_presets]),
+            )
 
     return result, used_embedded_settings
 
