@@ -1,0 +1,1 @@
+import{T as e,w as t}from"./client-rSsLaFs8.js";var n=t();function r({className:t}){let{t:r}=e();return(0,n.jsx)(`span`,{className:`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide bg-sky-100 dark:bg-sky-500/20 text-sky-700 dark:text-sky-300 ${t??``}`,children:r(`common.refillBadge`,`Refill pack`)})}export{r as t};
