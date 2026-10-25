@@ -49,6 +49,9 @@ data/
 
 # Build artifacts
 static/
+# Generated inside the image by backend/scripts/seed_spoolmandb_community_cache.py;
+# a local copy must not overwrite the fresh one at COPY backend/.
+backend/seeds/
 
 # Documentation
 docs/
