@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, false, func, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.core.database import Base
@@ -35,6 +35,9 @@ class SpoolBuddyDevice(Base):
     pending_system_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
     nfc_ok: Mapped[bool] = mapped_column(Boolean, default=False)
     scale_ok: Mapped[bool] = mapped_column(Boolean, default=False)
+    has_barcode: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    barcode_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
+    barcode_ok: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     uptime_s: Mapped[int] = mapped_column(Integer, default=0)
     system_stats: Mapped[str | None] = mapped_column(Text, nullable=True)
     ssh_host_key: Mapped[str | None] = mapped_column(Text, nullable=True)

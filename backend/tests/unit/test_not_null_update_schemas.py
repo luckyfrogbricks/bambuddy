@@ -17,6 +17,7 @@ NOT_A_ROW_UPDATE = {
     "ArchivePurgeSettings": "a setting, every field required",
     "TrashSettings": "a setting, every field required",
     "DisplaySettingsRequest": "SpoolBuddy device display, every field required",
+    "ScannerSettingsRequest": "SpoolBuddy device scanner, one required field",
     "ManyfoldConfigUpdate": "stored as settings",
     "CostCenterBudgetUpdateRequest": "replaces the budget rows as a whole",
     "AmsLabelBody": "upserts a label, every field required",
