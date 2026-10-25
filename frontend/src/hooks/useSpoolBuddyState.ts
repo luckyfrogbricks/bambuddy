@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useCallback } from 'react';
+import type { BarcodeLookupResult } from '../api/client';
 
 export interface MatchedSpool {
   id: number;
@@ -18,7 +19,30 @@ export interface MatchedSpool {
   label_weight: number;
   core_weight: number;
   weight_used: number;
+  /** How the roll was purchased (refill coil vs boxed with a spool). */
+  bought_as_refill?: boolean;
 }
+
+export type { LinkedCode } from '../api/client';
+
+/**
+ * A hardware scan surfaced over WS. The filament fields are the REST lookup
+ * shape (`BarcodeLookupResult`) by design — the backend builds the WS payload
+ * from the same schema — plus scan-delivery metadata.
+ */
+export type ScannedBarcode = Omit<BarcodeLookupResult, 'enabled' | 'source'> & {
+  source: BarcodeLookupResult['source'] | 'parsed';
+  kind: string;
+  /** AIM symbology family from the hardware scanner (null unless it is
+   * configured to transmit AIM IDs). Forwarded on create so the backend
+   * routes the code with the same evidence it classified it with. */
+  symbology: string | null;
+  valid: boolean;
+  deviceId: string;
+  // Monotonic-ish receipt timestamp (Date.now) so consumers can ignore a
+  // stale scan surfaced by a late WS reconnect rather than a fresh trigger.
+  receivedAt: number;
+};
 
 export interface SpoolBuddyState {
   weight: number | null;
@@ -29,6 +53,7 @@ export interface SpoolBuddyState {
   unknownTrayUuid: string | null;
   deviceOnline: boolean;
   deviceId: string | null;
+  lastScan: ScannedBarcode | null;
 }
 
 type Action =
@@ -37,7 +62,9 @@ type Action =
   | { type: 'UNKNOWN_TAG'; tagUid: string; trayUuid: string | null; deviceId: string }
   | { type: 'TAG_REMOVED'; deviceId: string }
   | { type: 'DEVICE_ONLINE'; deviceId: string }
-  | { type: 'DEVICE_OFFLINE'; deviceId: string };
+  | { type: 'DEVICE_OFFLINE'; deviceId: string }
+  | { type: 'BARCODE_SCANNED'; scan: ScannedBarcode }
+  | { type: 'BARCODE_CONSUMED' };
 
 const initialState: SpoolBuddyState = {
   weight: null,
@@ -48,6 +75,7 @@ const initialState: SpoolBuddyState = {
   unknownTrayUuid: null,
   deviceOnline: false,
   deviceId: null,
+  lastScan: null,
 };
 
 function reducer(state: SpoolBuddyState, action: Action): SpoolBuddyState {
@@ -98,6 +126,17 @@ function reducer(state: SpoolBuddyState, action: Action): SpoolBuddyState {
         weightStable: false,
         rawAdc: null,
       };
+    case 'BARCODE_SCANNED':
+      // Replace-latest: a new scan always supersedes the previous one, so
+      // "Rescan" is implicit and only the most recent code is ever acted on.
+      return {
+        ...state,
+        lastScan: action.scan,
+        deviceId: action.scan.deviceId || state.deviceId,
+        deviceOnline: true,
+      };
+    case 'BARCODE_CONSUMED':
+      return { ...state, lastScan: null };
     default:
       return state;
   }
@@ -177,6 +216,38 @@ export function useSpoolBuddyState() {
     });
   }, []);
 
+  const handleBarcodeScanned = useCallback((e: Event) => {
+    const detail = (e as CustomEvent).detail ?? {};
+    const d = detail.data ?? detail;
+    dispatch({
+      type: 'BARCODE_SCANNED',
+      scan: {
+        barcode: d.barcode ?? '',
+        kind: d.kind ?? 'gtin',
+        symbology: d.symbology ?? null,
+        valid: d.valid ?? false,
+        matched: d.matched ?? false,
+        source: d.source ?? null,
+        material: d.material ?? null,
+        brand: d.brand ?? null,
+        subtype: d.subtype ?? null,
+        color_name: d.color_name ?? null,
+        rgba: d.rgba ?? null,
+        label_weight: d.label_weight ?? null,
+        nozzle_temp_min: d.nozzle_temp_min ?? null,
+        nozzle_temp_max: d.nozzle_temp_max ?? null,
+        is_refill: d.is_refill ?? false,
+        linked_codes: d.linked_codes ?? [],
+        deviceId: d.device_id ?? '',
+        receivedAt: Date.now(),
+      },
+    });
+  }, []);
+
+  const clearScan = useCallback(() => {
+    dispatch({ type: 'BARCODE_CONSUMED' });
+  }, []);
+
   useEffect(() => {
     window.addEventListener('spoolbuddy-weight', handleWeight);
     window.addEventListener('spoolbuddy-tag-matched', handleTagMatched);
@@ -184,6 +255,7 @@ export function useSpoolBuddyState() {
     window.addEventListener('spoolbuddy-tag-removed', handleTagRemoved);
     window.addEventListener('spoolbuddy-online', handleOnline);
     window.addEventListener('spoolbuddy-offline', handleOffline);
+    window.addEventListener('spoolbuddy-barcode-scanned', handleBarcodeScanned);
 
     return () => {
       window.removeEventListener('spoolbuddy-weight', handleWeight);
@@ -192,8 +264,9 @@ export function useSpoolBuddyState() {
       window.removeEventListener('spoolbuddy-tag-removed', handleTagRemoved);
       window.removeEventListener('spoolbuddy-online', handleOnline);
       window.removeEventListener('spoolbuddy-offline', handleOffline);
+      window.removeEventListener('spoolbuddy-barcode-scanned', handleBarcodeScanned);
     };
-  }, [handleWeight, handleTagMatched, handleUnknownTag, handleTagRemoved, handleOnline, handleOffline]);
+  }, [handleWeight, handleTagMatched, handleUnknownTag, handleTagRemoved, handleOnline, handleOffline, handleBarcodeScanned]);
 
   const remainingWeight = state.matchedSpool
     ? Math.max(0, state.matchedSpool.label_weight - state.matchedSpool.weight_used)
@@ -207,5 +280,6 @@ export function useSpoolBuddyState() {
     ...state,
     remainingWeight,
     netWeight,
+    clearScan,
   };
 }

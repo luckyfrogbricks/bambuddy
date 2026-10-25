@@ -47,7 +47,13 @@ export function spoolMatchesQuery(spool: InventorySpool, query: string): boolean
       (link) =>
         link.supplier_name.toLowerCase().includes(q) ||
         (link.supplier_article_number?.toLowerCase().includes(q) ?? false)
-    ) ?? false)
+    ) ?? false) ||
+    // Typed code columns: searching "17600" must find every roll of that
+    // SKU (and likewise GTIN / ASIN / the user's own codes).
+    (spool.gtin_code?.toLowerCase().includes(q) ?? false) ||
+    (spool.sku_code?.toLowerCase().includes(q) ?? false) ||
+    (spool.asin_code?.toLowerCase().includes(q) ?? false) ||
+    (spool.other_code?.toLowerCase().includes(q) ?? false)
   );
 }
 

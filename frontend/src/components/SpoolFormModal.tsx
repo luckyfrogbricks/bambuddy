@@ -440,6 +440,12 @@ export function SpoolFormModal({
             return dried ? toDateTimeLocalValue(dried) : '';
           })(),
           spoolman_filament_id: null,
+          // A copy represents a new, not-yet-scanned physical spool — carrying
+          // over the source's codes would make it falsely resolve to this
+          // copy on a later scan of the original item.
+          gtin_code: isCopying ? '' : (spool.gtin_code || ''),
+          asin_code: isCopying ? '' : (spool.asin_code || ''),
+          sku_code: isCopying ? '' : (spool.sku_code || ''),
         });
         setPresetInputValue(spool.slicer_filament_name || spool.slicer_filament || '');
 
@@ -987,6 +993,9 @@ export function SpoolFormModal({
       category: formData.category.trim() || null,
       low_stock_threshold_pct: formData.low_stock_threshold_pct,
       material_number: formData.material_number.trim() || null,
+      gtin_code: formData.gtin_code.trim() || null,
+      asin_code: formData.asin_code.trim() || null,
+      sku_code: formData.sku_code.trim() || null,
       ...(spoolmanMode ? { spoolman_filament_id: formData.spoolman_filament_id } : {}),
     };
 
@@ -1218,6 +1227,8 @@ export function SpoolFormModal({
                   }}
                   globalLowStockThreshold={globalLowStockThreshold}
                   spoolmanMode={spoolmanMode}
+                  boughtAsRefill={isEditing ? spool?.bought_as_refill : undefined}
+                  otherCode={isEditing ? spool?.other_code : undefined}
                 />
               </div>
 
