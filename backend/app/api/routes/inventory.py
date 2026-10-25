@@ -3,7 +3,7 @@ import logging
 from datetime import date, datetime, timezone
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Path, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import case, delete, func, select
@@ -37,6 +37,7 @@ from backend.app.models.user import User
 from backend.app.schemas.location import LocationCreate, LocationResponse, LocationUpdate
 from backend.app.schemas.not_null import IgnoresNullForRequiredColumns
 from backend.app.schemas.spool import (
+    BarcodeLookupResponse,
     MaterialNumberStats,
     SpoolAssignmentCreate,
     SpoolAssignmentResponse,
@@ -48,6 +49,7 @@ from backend.app.schemas.spool import (
     SpoolKProfileResponse,
     SpoolResponse,
     SpoolUpdate,
+    classify_code,
     normalize_effect_type,
     normalize_extra_colors,
 )
@@ -63,6 +65,12 @@ from backend.app.schemas.supplier import (
 from backend.app.services import slot_unlink_grace, spool_swaps
 from backend.app.services.ams_assignment_lock import get_ams_assignment_lock
 from backend.app.services.ams_slot_presence import spool_present
+from backend.app.services.barcode_resolver import (
+    barcode_lookup_enabled,
+    resolve_barcode,
+    route_scanned_code,
+)
+from backend.app.services.catalog_search import CatalogSearchRow, search_catalog
 from backend.app.services.location_service import (
     DUPLICATE_LOCATION_NAME,
     assign_location_name,
@@ -1626,10 +1634,44 @@ async def create_spool(
     _: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_UPDATE),
 ):
     """Create a new spool."""
+    data_dict = spool_data.model_dump()
+    # scanned_code is write-only (not a Spool column): the raw code a scanner
+    # read, routed below into the typed *_code columns with same-package
+    # siblings cross-filled. Popped before building the ORM object.
+    scanned_code = data_dict.pop("scanned_code", None)
+    scanned_symbology = data_dict.pop("scanned_symbology", None)
+    fields_set = set(spool_data.model_fields_set) - {"scanned_code", "scanned_symbology"}
     try:
-        payload = await prepare_internal_spool_payload(db, spool_data.model_dump(), set(spool_data.model_fields_set))
+        payload = await prepare_internal_spool_payload(db, data_dict, fields_set)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if scanned_code:
+        settings = await _load_settings_map(db)
+        routed = await route_scanned_code(
+            scanned_code,
+            settings,
+            bought_as_refill=bool(payload.get("bought_as_refill")),
+            symbology=scanned_symbology,
+        )
+        # Explicitly-supplied columns always win over routed/cross-filled ones.
+        for column, value in routed.items():
+            if value and not payload.get(column):
+                payload[column] = value
+    if payload.get("tag_uid"):
+        # A tag identifies exactly one active spool — silently creating a
+        # duplicate makes every later tag lookup ambiguous (the SpoolBuddy
+        # kiosk hit this when a stale tag from the previous roll leaked into
+        # a barcode-scan add). Archived spools keep their tag and don't count.
+        normalized_tag = normalize_tag_uid(payload["tag_uid"])
+        existing = await db.execute(
+            select(Spool.id).where(func.upper(Spool.tag_uid) == normalized_tag, Spool.archived_at.is_(None)).limit(1)
+        )
+        existing_id = existing.scalar_one_or_none()
+        if existing_id is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Tag {payload['tag_uid']} is already linked to spool #{existing_id}",
+            )
     payload = _lock_entered_weight(payload, set(spool_data.model_fields_set))
     # A new spool of an already-numbered product inherits its material number (#2870).
     payload = await apply_material_number_inheritance(db, payload)
@@ -1654,11 +1696,27 @@ async def bulk_create_spools(
 ):
     """Create multiple identical spools."""
     spools = []
-    fields_set = set(data.spool.model_fields_set)
+    data_dict = data.spool.model_dump()
+    # Same write-only pop as create_spool above; the batch shares one scanned
+    # code, so it routes/cross-fills once, not once per spool.
+    scanned_code = data_dict.pop("scanned_code", None)
+    scanned_symbology = data_dict.pop("scanned_symbology", None)
+    fields_set = set(data.spool.model_fields_set) - {"scanned_code", "scanned_symbology"}
     try:
-        payload = await prepare_internal_spool_payload(db, data.spool.model_dump(), fields_set)
+        payload = await prepare_internal_spool_payload(db, data_dict, fields_set)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if scanned_code:
+        settings = await _load_settings_map(db)
+        routed = await route_scanned_code(
+            scanned_code,
+            settings,
+            bought_as_refill=bool(payload.get("bought_as_refill")),
+            symbology=scanned_symbology,
+        )
+        for column, value in routed.items():
+            if value and not payload.get(column):
+                payload[column] = value
     payload = _lock_entered_weight(payload, fields_set)
     # A new spool of an already-numbered product inherits its material number (#2870).
     payload = await apply_material_number_inheritance(db, payload)
@@ -1674,6 +1732,57 @@ async def bulk_create_spools(
     result = await db.execute(select(Spool).options(*spool_response_loads()).where(Spool.id.in_(ids)))
     await ws_manager.broadcast({"type": "inventory_changed"})
     return list(result.scalars().all())
+
+
+@router.get("/barcode/catalog-search", response_model=list[CatalogSearchRow])
+async def barcode_catalog_search(
+    q: str = Query(..., min_length=2, max_length=100),
+    limit: int = Query(25, ge=1, le=100),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    _: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_READ),
+):
+    """Search inventory + cached community databases for the SpoolBuddy "Find
+    This Filament" flow (see services/catalog_search.py for the search itself).
+
+    Declared before ``GET /barcode/{barcode}`` so the literal path wins
+    routing over the parameterised one.
+    """
+    settings = await _load_settings_map(db)
+    client = await _ensure_spoolman_client(settings)
+    return await search_catalog(db, q, limit, settings, client)
+
+
+@router.get("/barcode/{barcode}", response_model=BarcodeLookupResponse)
+async def lookup_barcode(
+    # Matches Spool.barcode's VARCHAR(64) / SpoolCreate/SpoolUpdate's max_length
+    # — without this, an arbitrarily long path segment reaches classify_code
+    # and the external-lookup chain unbounded.
+    barcode: str = Path(..., max_length=64),
+    db: AsyncSession = Depends(get_db, scope="function"),
+    _: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_READ),
+):
+    """Resolve a scanned/entered barcode to filament fields.
+
+    Checks the user's own inventory (any spool previously created from this
+    barcode) before falling back to the external community databases, so
+    repeat scans of the same retail barcode get instant, exact matches
+    without an external call.
+    """
+    settings = await _load_settings_map(db)
+    spoolman_client = await _ensure_spoolman_client(settings)
+    canonical, kind = classify_code(barcode)
+    fields, source, all_codes = await resolve_barcode(db, canonical, kind, settings, spoolman_client)
+    linked_codes = [c for c in all_codes if c["code"] != canonical]
+    scanned_is_refill = any(c.get("is_refill") for c in all_codes if c["code"] == canonical)
+    return BarcodeLookupResponse(
+        enabled=barcode_lookup_enabled(settings),
+        matched=source is not None,
+        source=source,
+        barcode=canonical,
+        is_refill=scanned_is_refill,
+        linked_codes=linked_codes,
+        **fields,
+    )
 
 
 @router.patch("/spools/{spool_id}", response_model=SpoolResponse)
