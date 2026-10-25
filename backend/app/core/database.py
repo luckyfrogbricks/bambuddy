@@ -5579,6 +5579,8 @@ async def _run_migrations(conn):
     await _safe_execute(conn, "ALTER TABLE library_files ADD COLUMN external_url VARCHAR(500)")
     await _safe_execute(conn, "ALTER TABLE library_files ADD COLUMN photos JSON")
 
+    # Migration: typed code columns for spools (#2648).
+    await _migrate_add_spool_code_columns(conn)
     # Migration: storage location sensor alerts (#2824), own column rather than
     # reusing on_ha_sensor_alert. That column can be scoped to one printer
     # (printer_id), and a location alert has no printer to scope by — sharing
@@ -5965,6 +5967,7 @@ _PG_COLUMNS_SET_FROM_MODEL = (
     ("smart_plugs", "controls_printer_power"),
     ("smart_plugs", "off_delay_after_drying_minutes"),
     ("smart_plugs", "rest_energy_total_multiplier"),
+    ("spool", "bought_as_refill"),
     ("spool", "weight_used_baseline"),
     ("virtual_printers", "gcode_injection"),
     ("virtual_printers", "queue_force_color_match"),
@@ -7206,6 +7209,28 @@ async def _migrate_repair_rfid_core_weight(conn) -> None:
             text('INSERT INTO settings ("key", value) VALUES (:k, :v)'),
             {"k": flag, "v": "true"},
         )
+
+
+async def _migrate_add_spool_code_columns(conn) -> None:
+    """Add the typed code columns for scan-to-add lookups (#2648).
+
+    ``gtin_code`` stores the retail barcode ONLY (canonicalized, checksum
+    valid); ``sku_code`` the manufacturer SKU/article number; ``asin_code``
+    an Amazon ASIN; ``other_code`` a user-owned free code. ``bought_as_refill``
+    records purchase form (refill coil vs boxed with spool). Any stored code
+    resolves a later scan from the user's own inventory before the external
+    community databases. The model declares index=True on the searched
+    columns, so fresh installs get the indexes from create_all(); migrated
+    databases need them spelled out.
+    """
+    await _safe_execute(conn, "ALTER TABLE spool ADD COLUMN gtin_code VARCHAR(64)")
+    await _safe_execute(conn, "ALTER TABLE spool ADD COLUMN asin_code VARCHAR(16)")
+    await _safe_execute(conn, "ALTER TABLE spool ADD COLUMN sku_code VARCHAR(64)")
+    await _safe_execute(conn, "ALTER TABLE spool ADD COLUMN other_code VARCHAR(64)")
+    await _safe_execute(conn, "ALTER TABLE spool ADD COLUMN bought_as_refill BOOLEAN DEFAULT FALSE")
+    await _safe_execute(conn, "CREATE INDEX IF NOT EXISTS ix_spool_gtin_code ON spool (gtin_code)")
+    await _safe_execute(conn, "CREATE INDEX IF NOT EXISTS ix_spool_asin_code ON spool (asin_code)")
+    await _safe_execute(conn, "CREATE INDEX IF NOT EXISTS ix_spool_sku_code ON spool (sku_code)")
 
 
 async def _migrate_backfill_variant_groups(conn) -> None:
